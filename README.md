@@ -46,7 +46,7 @@ La instalación local sigue siendo la fuente de las capturas de apertura.
 La tercera sección, **Revisión manual**, muestra hasta 50 sesiones guardadas.
 Por defecto enseña aperturas fuera de la banda objetivo con gap de al menos
 1 %, aunque el score haya sido bajo. Se puede ampliar a todas las aperturas
-fuera de banda o a todos los símbolos. Cada página muestra 12, 24 o 50
+fuera de banda o a todos los símbolos, y filtrar sólo score final ≥ 70. Cada página muestra 12, 24 o 50
 gráficas. La vista **Sesión completa** permite juzgar el desarrollo posterior;
 las vistas **10 s**, **20 s**, **30 s** y **60 s** muestran sólo precios observados hasta
 ese corte y bandas BB(20,2) de 15 minutos recalculadas provisionalmente.

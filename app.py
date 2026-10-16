@@ -620,6 +620,7 @@ def manual_review_panel() -> None:
     date_choice = filters[1].selectbox("Sesión", ("Todas", *dates))
     label_choice = filters[2].selectbox("Etiqueta", ("Todas", "Pendiente", *LABELS))
     page_size = filters[3].selectbox("Gráficas/página", (12, 24, 50))
+    only_high_score = st.checkbox("Sólo score final ≥ 70")
     if pool_name == "Fuera de banda y gap ≥1%":
         pool = setups.loc[(setups.distance_to_band_pct > 0) &
                           (setups.gap_pct.abs() >= 1)].copy()
@@ -631,14 +632,17 @@ def manual_review_panel() -> None:
         pool = setups.copy()
     if date_choice != "Todas":
         pool = pool.loc[pool.session_date == date_choice]
+    if only_high_score:
+        pool = pool.loc[pd.to_numeric(pool.score, errors="coerce") >= 70]
     pool["manual_label"] = [labeled.get((row.session_date, row.ticker), "Pendiente")
                             for row in pool.itertuples()]
     if label_choice != "Todas":
         pool = pool.loc[pool.manual_label == label_choice]
     pool = pool.sort_values(["session_date", "distance_to_band_pct"],
                             ascending=[False, False], na_position="last")
-    st.caption(f"{len(pool)} casos en este filtro. Los casos con score bajo siguen visibles "
-               "si su apertura quedó fuera de la banda; «Pendiente» no significa Mala.")
+    st.caption(f"{len(pool)} casos en este filtro. «Pendiente» no significa Mala."
+               + ("" if only_high_score else
+                  " Los casos con score bajo siguen visibles si abrieron fuera de banda."))
     with st.expander("Descargar etiquetas y variables tempranas (opcional)"):
         st.caption("Tus juicios ya están guardados. Genera el CSV sólo si quieres una "
                    "copia para análisis; después de cambiar etiquetas, vuelve a generarlo.")
