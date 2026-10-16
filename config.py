@@ -7,6 +7,7 @@ from hashlib import sha256
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 DATABASE_PATH = DATA_DIR / "efecto_iman.db"
+HISTORY_SESSION_LIMIT = 100
 
 # Símbolos del listado original y las ampliaciones solicitadas; no se usan sus precios.
 TICKERS = (

@@ -7,7 +7,7 @@ from datetime import datetime
 
 import pandas as pd
 
-from config import DATABASE_PATH, UNIVERSE_ID
+from config import DATABASE_PATH, HISTORY_SESSION_LIMIT, UNIVERSE_ID
 from opening_scan import SETUP_COLUMNS
 
 
@@ -117,7 +117,7 @@ def load_daily_session(day: str) -> tuple[pd.DataFrame, pd.DataFrame, str | None
     return pd.DataFrame.from_records(payloads, columns=SETUP_COLUMNS), candles, updated[0]
 
 
-def export_history(days: int = 50) -> tuple[pd.DataFrame, pd.DataFrame]:
+def export_history(days: int = HISTORY_SESSION_LIMIT) -> tuple[pd.DataFrame, pd.DataFrame]:
     dates = session_dates()[:days]
     if not dates:
         return pd.DataFrame(columns=["session_date", "source"] + SETUP_COLUMNS), pd.DataFrame()

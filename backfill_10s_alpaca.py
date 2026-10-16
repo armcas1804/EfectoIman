@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import requests
 
-from config import DATABASE_PATH, DATA_DIR, TICKERS
+from config import DATABASE_PATH, DATA_DIR, HISTORY_SESSION_LIMIT, TICKERS
 
 
 NEW_YORK = ZoneInfo("America/New_York")
@@ -30,7 +30,7 @@ OUTPUT_COLUMNS = (
 TRADE_SYMBOLS = tuple(ticker for ticker in TICKERS if ticker != "SPX")
 
 
-def completed_session_dates(limit: int = 50,
+def completed_session_dates(limit: int = HISTORY_SESSION_LIMIT,
                             database: Path = DATABASE_PATH) -> list[str]:
     today = datetime.now(NEW_YORK).date().isoformat()
     with closing(sqlite3.connect(database)) as db:
@@ -115,7 +115,7 @@ def fetch_day(session: requests.Session, day: str,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--days", type=int, default=50)
+    parser.add_argument("--days", type=int, default=HISTORY_SESSION_LIMIT)
     parser.add_argument("--date", type=date.fromisoformat,
                         help="consultar una fecha cuyo corte ya tenga 15 minutos")
     parser.add_argument("--refresh", action="store_true",

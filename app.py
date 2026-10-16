@@ -13,7 +13,7 @@ import pandas as pd
 import streamlit as st
 
 import real_data
-from config import DATA_DIR, TICKERS
+from config import DATA_DIR, HISTORY_SESSION_LIMIT, TICKERS
 from daily_chart import build_daily_chart
 from daily_store import (export_history, initialize_daily_store,
                          load_daily_session, save_daily_session, session_dates)
@@ -492,7 +492,7 @@ def historical_panel() -> None:
     if st.button("Obtener histórico reciente de 15 min"):
         with st.spinner("Descargando histórico reciente..."):
             try:
-                saved, available, missing, scanned = refresh_real(50)
+                saved, available, missing, scanned = refresh_real(HISTORY_SESSION_LIMIT)
                 st.success(f"Se guardaron {saved} sesiones de {available} fechas disponibles; "
                            f"{scanned} de {len(TICKERS)} símbolos devolvieron velas.")
                 if missing:
@@ -510,8 +510,9 @@ def historical_panel() -> None:
     session_view(setups, candles, f"hist_{selected_date}")
     st.divider()
     st.subheader("Exportación histórica")
-    setups_all, candles_all = export_history(50)
-    st.caption(f"{len(setups_all)} registros diagnósticos en hasta 50 sesiones. "
+    setups_all, candles_all = export_history(HISTORY_SESSION_LIMIT)
+    st.caption(f"{len(setups_all)} registros diagnósticos en hasta "
+               f"{HISTORY_SESSION_LIMIT} sesiones. "
                "Las velas de 1 minuto solo están disponibles para fechas recientes.")
     if not setups_all.empty:
         outcomes = build_outcomes(setups_all, candles_all)
@@ -528,7 +529,7 @@ def historical_panel() -> None:
 
 @st.cache_data(ttl=60)
 def review_history() -> tuple[pd.DataFrame, pd.DataFrame]:
-    return export_history(50)
+    return export_history(HISTORY_SESSION_LIMIT)
 
 
 @st.cache_data(ttl=60)
@@ -598,7 +599,7 @@ def manual_review_panel() -> None:
     if setups.empty:
         st.info("No hay sesiones históricas locales. Descárgalas desde Historial.")
         return
-    dates = sorted(setups.session_date.unique(), reverse=True)[:50]
+    dates = sorted(setups.session_date.unique(), reverse=True)[:HISTORY_SESSION_LIMIT]
     setups = setups.loc[setups.session_date.isin(dates)].copy()
     reviews = load_reviews()
     reviews = reviews.loc[reviews.session_date.isin(dates)]

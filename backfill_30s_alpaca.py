@@ -15,7 +15,7 @@ import pandas as pd
 import requests
 
 from backfill_10s_alpaca import ENDPOINT, TRADE_SYMBOLS, completed_session_dates
-from config import DATA_DIR
+from config import DATA_DIR, HISTORY_SESSION_LIMIT
 
 
 NY = ZoneInfo("America/New_York")
@@ -122,7 +122,7 @@ def fetch_day(session: requests.Session, day: str,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--days", type=int, default=50)
+    parser.add_argument("--days", type=int, default=HISTORY_SESSION_LIMIT)
     parser.add_argument("--date", type=date.fromisoformat)
     parser.add_argument("--refresh", action="store_true")
     args = parser.parse_args()

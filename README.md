@@ -16,7 +16,10 @@ python -m venv .venv
 ```
 
 Abre `http://127.0.0.1:8501`. La aplicación funciona localmente; la consulta
-de datos bursátiles requiere Internet. Para cargar hasta 50 sesiones recientes:
+de datos bursátiles requiere Internet. El histórico puede acumular hasta 100
+sesiones en la revisión; la descarga pública actual sólo solicita 59 días
+recientes y conserva las sesiones anteriores ya guardadas. Para cargar las
+sesiones recientes disponibles:
 
 ```powershell
 .\.venv\Scripts\python.exe backfill_history.py
@@ -43,7 +46,7 @@ La instalación local sigue siendo la fuente de las capturas de apertura.
 
 ## Revisión manual de gráficas
 
-La tercera sección, **Revisión manual**, muestra hasta 50 sesiones guardadas.
+La tercera sección, **Revisión manual**, muestra hasta 100 sesiones guardadas.
 Por defecto enseña aperturas fuera de la banda objetivo con gap de al menos
 1 %, aunque el score haya sido bajo. Se puede ampliar a todas las aperturas
 fuera de banda o a todos los símbolos, y filtrar sólo score final ≥ 70. Cada
@@ -67,7 +70,7 @@ completar esos cortes con operaciones históricas SIP de Alpaca, configura las
 dos variables de entorno descritas más abajo y ejecuta:
 
 ```powershell
-.\.venv\Scripts\python.exe backfill_30s_alpaca.py --days 50
+.\.venv\Scripts\python.exe backfill_30s_alpaca.py --days 100
 ```
 
 El script guarda `apertura_historica_30s_FECHA.csv` y una trayectoria con el
@@ -99,21 +102,21 @@ final del periodo. No se alteran los pesos del scanner ni las alertas en vivo a
 partir de esta evaluación exploratoria.
 
 La sección Historial muestra la cobertura de los cortes reales de 09:30:10
-para las últimas 50 sesiones guardadas y la incluye en el ZIP como
+para las últimas 100 sesiones guardadas y la incluye en el ZIP como
 `cobertura_apertura_10s.csv`. Un corte sólo cuenta si existe su archivo de
 cotizaciones y la hora de recepción está entre 09:30:00 y 09:30:10 ET.
 Esta tabla registra ausencias; no crea precios subminuto. Una prueba directa
 del proveedor rechazó `interval=10s`. Sus velas de `1m` sólo pudieron
 consultarse dentro de los últimos 30 días, en solicitudes de hasta 8 días.
 
-Para reconstruir los primeros diez segundos de hasta 50 sesiones anteriores,
+Para reconstruir los primeros diez segundos de hasta 100 sesiones anteriores,
 `backfill_10s_alpaca.py` consulta operaciones históricas SIP de Alpaca. Requiere
 una cuenta y dos claves de API locales en las variables de entorno
 `APCA_API_KEY_ID` y `APCA_API_SECRET_KEY`; no guarda las claves en archivos ni
 ejecuta órdenes. Con ellas configuradas en PowerShell:
 
 ```powershell
-.\.venv\Scripts\python.exe backfill_10s_alpaca.py --days 50
+.\.venv\Scripts\python.exe backfill_10s_alpaca.py --days 100
 ```
 
 Para revisar una sesión concreta una vez pasados 15 minutos desde el corte,
@@ -381,7 +384,7 @@ garantía de alerta exactamente a la apertura.
 Al cambiar el universo, las sesiones guardadas con los 51 símbolos anteriores
 permanecen en SQLite, pero la vista Historial muestra solo sesiones recalculadas
 para el universo actual. Usa «Obtener histórico reciente de 15 min» para cargar
-las nuevas empresas en hasta 50 sesiones disponibles.
+las nuevas empresas en hasta 100 sesiones disponibles.
 
 La exportación contiene `diagnosticos.csv`, `velas_15m.csv` y
 `resultados_descriptivos.csv`. Los resultados descriptivos no son retornos

@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from config import DATABASE_PATH, DATA_DIR
+from config import DATABASE_PATH, DATA_DIR, HISTORY_SESSION_LIMIT
 
 
 NEW_YORK = ZoneInfo("America/New_York")
@@ -17,7 +17,7 @@ REQUIRED_COLUMNS = {"ticker", "price_at_cutoff", "quote_event_time", "quote_rece
 
 def ten_second_coverage(database: Path = DATABASE_PATH,
                         snapshot_dir: Path = DATA_DIR / "snapshots",
-                        limit: int = 50) -> pd.DataFrame:
+                        limit: int = HISTORY_SESSION_LIMIT) -> pd.DataFrame:
     """Cuenta sólo precios realmente recibidos en el corte, nunca velas reconstruidas."""
     with closing(sqlite3.connect(database)) as db:
         sessions = db.execute(

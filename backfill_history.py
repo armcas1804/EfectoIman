@@ -1,6 +1,6 @@
 """Carga en SQLite las sesiones históricas disponibles del universo configurado."""
 
-from config import TICKERS
+from config import HISTORY_SESSION_LIMIT, TICKERS
 from daily_store import initialize_daily_store, save_daily_session
 from real_data import available_days, download_bars, scan_real_day
 
@@ -23,7 +23,7 @@ def main() -> None:
     print(f"Símbolos con velas de 5 min: {len(five_minute_bars)}/{len(TICKERS)}", flush=True)
     if missing_five:
         print("Sin velas de 5 min: " + ", ".join(missing_five), flush=True)
-    days = available_days(bars)[-50:]
+    days = available_days(bars)[-HISTORY_SESSION_LIMIT:]
     saved = 0
     candidates_total = 0
     for day in days:
