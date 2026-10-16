@@ -570,6 +570,19 @@ def change_review_page(delta: int, pages: int) -> None:
         1, min(pages, st.session_state.manual_review_page + delta))
 
 
+def review_page_controls(pages: int, position: str) -> None:
+    page = st.session_state.manual_review_page
+    _, previous, current, following, _ = st.columns([2, .6, 1.2, .6, 2])
+    previous.button("←", key=f"review_prev_{position}", help="Página anterior",
+                    disabled=page <= 1, use_container_width=True,
+                    on_click=change_review_page, args=(-1, pages))
+    current.markdown(f"<div style='text-align:center;padding-top:9px'>"
+                     f"Página {page} de {pages}</div>", unsafe_allow_html=True)
+    following.button("→", key=f"review_next_{position}", help="Página siguiente",
+                     disabled=page >= pages, use_container_width=True,
+                     on_click=change_review_page, args=(1, pages))
+
+
 def manual_review_panel() -> None:
     st.subheader("Revisión manual de aperturas")
     st.info("Elige un juicio visual debajo de cada gráfica: se guarda automáticamente "
@@ -578,8 +591,9 @@ def manual_review_panel() -> None:
     saved_notice = st.session_state.pop("review_saved_notice", None)
     if saved_notice:
         st.success(saved_notice)
-    st.caption("Los cortes tempranos sólo muestran precios y bandas disponibles hasta ese "
-               "segundo. Las etiquetas no modifican el scanner ni su score.")
+    st.caption("La gráfica de apertura muestra la última hora previa y las primeras "
+               "dos horas de la sesión. Los cortes tempranos sólo muestran datos "
+               "disponibles hasta ese segundo. Las etiquetas no modifican el scanner ni su score.")
     setups, candles = review_history()
     if setups.empty:
         st.info("No hay sesiones históricas locales. Descárgalas desde Historial.")
@@ -656,14 +670,14 @@ def manual_review_panel() -> None:
                                    file_name="efecto_iman_revision_manual.csv", mime="text/csv")
     if pool.empty:
         return
-    view = st.radio("Vista de la gráfica", ("Sesión completa", "10 s", "20 s",
+    view = st.radio("Vista de la gráfica", ("Apertura (15 min)", "10 s", "20 s",
                                            "30 s", "60 s"),
                     horizontal=True)
     pages = math.ceil(len(pool) / page_size)
     st.session_state.manual_review_page = max(
         1, min(pages, st.session_state.get("manual_review_page", 1)))
-    page = st.number_input("Página", min_value=1, max_value=pages,
-                           key="manual_review_page")
+    review_page_controls(pages, "top")
+    page = st.session_state.manual_review_page
     visible = pool.iloc[(page - 1) * page_size:page * page_size]
     reviewed_on_page = sum(labeled.get((row.session_date, row.ticker)) in LABELS
                            for row in visible.itertuples())
@@ -681,12 +695,13 @@ def manual_review_panel() -> None:
             header[1].caption(f"Gap {row.gap_pct:+.2f}%")
             header[2].caption(f"Distancia {row.distance_to_band_pct:+.2f}%")
             header[3].caption(f"Score final {row.score:.1f}")
-            if view == "Sesión completa":
+            if view == "Apertura (15 min)":
                 if sample_candles.empty:
                     st.info("No hay velas de 15 minutos para este caso.")
                 else:
                     figure = build_daily_chart(sample_candles, ticker, float(row.gap_pct),
-                                               -1, float("nan"), str(row.target_band))
+                                               -1, float("nan"), str(row.target_band),
+                                               focus_opening=True)
                     st.plotly_chart(figure, width="stretch", config={"displayModeBar": False},
                                     key=f"review_chart_{day}_{ticker}")
             else:
@@ -708,9 +723,9 @@ def manual_review_panel() -> None:
                                f"distancia exterior {chosen.distance_outside_target_pct:+.2f}% · "
                                f"ángulo {angle}")
             previous = labeled.get((day, ticker), "Pendiente")
-            selected = st.selectbox("Juicio visual", ("Pendiente", *LABELS),
-                                    index=("Pendiente", *LABELS).index(previous),
-                                    key=f"review_label_{day}_{ticker}")
+            choices = (*LABELS, "Pendiente")
+            selected = st.radio("Juicio visual", choices, index=choices.index(previous),
+                                horizontal=True, key=f"review_label_{day}_{ticker}")
             st.caption("Juicio guardado automáticamente" if previous != "Pendiente"
                        else "Sin juicio guardado")
             if selected != previous:
@@ -720,11 +735,7 @@ def manual_review_panel() -> None:
                 st.session_state.review_saved_notice = (
                     f"{day} · {ticker}: juicio guardado como {selected}")
                 st.rerun()
-    navigation = st.columns(2)
-    navigation[0].button("Página anterior", disabled=page <= 1,
-                         on_click=change_review_page, args=(-1, pages))
-    navigation[1].button("Página siguiente", disabled=page >= pages,
-                         on_click=change_review_page, args=(1, pages))
+    review_page_controls(pages, "bottom")
 
 
 def main() -> None:

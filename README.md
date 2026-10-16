@@ -46,9 +46,11 @@ La instalación local sigue siendo la fuente de las capturas de apertura.
 La tercera sección, **Revisión manual**, muestra hasta 50 sesiones guardadas.
 Por defecto enseña aperturas fuera de la banda objetivo con gap de al menos
 1 %, aunque el score haya sido bajo. Se puede ampliar a todas las aperturas
-fuera de banda o a todos los símbolos, y filtrar sólo score final ≥ 70. Cada página muestra 12, 24 o 50
-gráficas. La vista **Sesión completa** permite juzgar el desarrollo posterior;
-las vistas **10 s**, **20 s**, **30 s** y **60 s** muestran sólo precios observados hasta
+fuera de banda o a todos los símbolos, y filtrar sólo score final ≥ 70. Cada
+página muestra 12, 24 o 50 gráficas. La vista **Apertura (15 min)** muestra la
+última hora del día previo y las primeras dos horas de la sesión. Calcula
+Bollinger con todas las velas disponibles antes de recortar lo visible. Las
+vistas **10 s**, **20 s**, **30 s** y **60 s** muestran sólo precios observados hasta
 ese corte y bandas BB(20,2) de 15 minutos recalculadas provisionalmente.
 Si falta el corte real, la pantalla indica que no está disponible.
 

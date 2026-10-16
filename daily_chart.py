@@ -14,9 +14,16 @@ def build_daily_chart(candles: pd.DataFrame, ticker: str, gap_pct: float,
                       cutoff_seconds: int | None = None,
                       cutoff_price: float = float("nan"),
                       cutoff_upper: float = float("nan"),
-                      cutoff_lower: float = float("nan")) -> go.Figure:
+                      cutoff_lower: float = float("nan"),
+                      focus_opening: bool = False) -> go.Figure:
     rows = candles.loc[candles.ticker == ticker].sort_values("bar_index")
     series = bollinger_bands(rows)
+    if focus_opening:
+        opening = series.loc[series.session == "ACTUAL"]
+        if not opening.empty:
+            opening_index = int(opening.iloc[0].bar_index)
+            series = series.loc[series.bar_index.between(
+                opening_index - 4, opening_index + 7)].reset_index(drop=True)
     figure = go.Figure()
     figure.add_trace(go.Scatter(x=series.bar_index, y=series.bb_lower, mode="lines",
                                 name="Banda inferior", line=dict(color="#777777", width=1)))
@@ -88,7 +95,9 @@ def build_daily_chart(candles: pd.DataFrame, ticker: str, gap_pct: float,
         xaxis=dict(tickmode="array", tickvals=ticks.bar_index,
                    ticktext=[f"{r.session[0]} {r.time}" for r in ticks.itertuples()],
                    rangeslider=dict(visible=False), gridcolor="#e5e5e5",
-                   range=[-1, len(series) + 1]),
+                   range=([float(series.bar_index.min()) - .5,
+                           float(series.bar_index.max()) + .5]
+                          if focus_opening and not series.empty else [-1, len(series) + 1])),
         yaxis=dict(gridcolor="#e5e5e5"),
     )
     return figure
