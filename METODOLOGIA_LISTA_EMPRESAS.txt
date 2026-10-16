@@ -1,0 +1,284 @@
+EFECTO IMÁN — ESPECIFICACIÓN MATEMÁTICA DE LA LISTA DE EMPRESAS
+Estado del código: 10 de octubre de 2026. Zona horaria de la sesión: America/New_York.
+
+OBJETIVO DE ESTE DOCUMENTO
+
+Permitir que otra IA replique el scanner que alimenta la lista de la aplicación
+actual. Describe el comportamiento implementado, incluidos sus límites
+experimentales. No representa una estrategia validada ni una señal de compra.
+La función principal es opening_setups() de opening_scan.py. La función auxiliar
+upper_angle_openings() produce otro diagnóstico y NO es la fuente de la lista
+principal del dashboard.
+
+1. UNIVERSO Y DATOS DE ENTRADA
+
+Se escanean estos 72 símbolos configurados en config.py:
+AMZN, AAPL, GOOG, META, MSFT, NFLX, TSLA, PLTR, ORCL, AMD, MU, NVDA,
+QCOM, AVGO, SOXL, DASH, LYFT, UBER, HD, LOW, WMT, DIA, QQQ, SPY, SPX,
+IWM, TNA, AXP, C, MA, PYPL, V, BABA, LI, NIO, XPEV, GLD, SLV, USO,
+COIN, HOOD, CVS, MRNA, PFE, BA, URA, CCL, RCL, AAL, DAL, TZA, JNJ,
+DIS, MRVL, IBM, JPM, XOM, CAT, SBUX, VZ, T, MCD, NKE, KO, SCHW, COST,
+DELL, WFC, ANET, PG, CVX, MRK.
+Al consultar Yahoo, SPX se traduce al símbolo ^GSPC.
+
+Fuente actual: yfinance/Yahoo. Se descargan OHLC de sesión regular en velas
+de 15 minutos, con auto_adjust=False. Para cada símbolo y fecha se toma la
+última sesión disponible anterior, hasta 26 velas de 15 minutos, ordenadas
+cronológicamente. Se necesitan al menos 24 velas previas; sin ellas no se
+evalúa la apertura. Para el día actual también se usan velas de 1 minuto ya
+cerradas cuando existen. Una sesión histórica puede aportar velas de 5 minutos.
+
+En la captura diaria rápida, desde las 09:25 ET se preparan las velas previas
+de 15 minutos y se escucha el flujo de cotizaciones. A las 09:30:10 ET se
+congela, para cada símbolo, la cotización válida con la MAYOR marca temporal
+del proveedor entre las recibidas localmente de 09:30:00 a 09:30:10. Se
+exige precio finito y positivo y marca del proveedor desde 09:30:00 hasta
+como máximo tres segundos posterior a la recepción local, para tolerar
+desfase de relojes. Ésta es opening_price en esa captura; puede diferir del
+precio oficial de apertura. Si no llegó una cotización válida, el símbolo
+queda sin apertura y no aparece como candidato. En el escaneo histórico,
+opening_price es la apertura de la primera vela de 1 minuto cuando existe;
+en su defecto, la apertura de la primera vela de 15 minutos.
+
+2. BANDAS DE BOLLINGER PREVIAS: BB(20, 2) SOBRE VELAS DE 15 MINUTOS
+
+Para cada vela de 15 minutos, usando sus últimos 20 cierres:
+
+M = media aritmética de los 20 cierres
+sigma = desviación estándar POBLACIONAL de los 20 cierres (ddof=0)
+upper = M + 2*sigma
+lower = M - 2*sigma
+
+Las bandas de referencia para la apertura son las de la ÚLTIMA vela cerrada
+de la sesión previa. Denotar:
+
+previous_close = cierre de esa última vela
+prior_upper = banda superior de esa vela
+prior_lower = banda inferior de esa vela
+prior_middle = media de esa vela
+
+Ancho previo, expresado en porcentaje:
+
+prior_bb_width_pct = (prior_upper - prior_lower)/prior_middle * 100
+
+No se usa la primera vela de 15 minutos del nuevo día para establecer estas
+bandas previas.
+
+3. GAP, DIRECCIÓN Y DISTANCIA EXTERIOR
+
+gap_pct = (opening_price/previous_close - 1)*100
+
+Si gap_pct >= 0: dirección UP, banda objetivo prior_upper, signo s=+1.
+Si gap_pct < 0: dirección DOWN, banda objetivo prior_lower, signo s=-1.
+
+El umbral de gap es abs(gap_pct) >= 1.0 %. La implementación actual acepta
+gaps alcistas y bajistas; no está limitada sólo a alcistas.
+
+La distancia exterior se define de modo distinto según la dirección:
+
+UP:   distance_to_band_pct = (opening_price/prior_upper - 1)*100
+DOWN: distance_to_band_pct = (prior_lower/opening_price - 1)*100
+
+Se exige distance_to_band_pct > 0 y >= 0.50 %. Por tanto, UP abre realmente
+por encima de la banda superior y DOWN realmente por debajo de la inferior.
+Las comparaciones usan el precio recibido o la apertura histórica, según la
+fuente descrita en la sección 1; no se usa el precio futuro de la sesión.
+
+4. PENDIENTE DE BOLLINGER ANTES DE ABRIR
+
+Se toman las últimas CINCO observaciones ya cerradas de la banda objetivo
+(banda superior si UP, inferior si DOWN), una por vela de 15 minutos:
+B[0], B[1], B[2], B[3], B[4], con B[4] como última banda previa.
+
+Calcular beta = pendiente de regresión lineal por mínimos cuadrados de B[i]
+contra i=0,1,2,3,4. Equivalentemente:
+
+beta = sum((i-media(i))*(B[i]-media(B))) /
+       sum((i-media(i))^2)
+
+prior_target_band_slope_pct = beta/B[4]*100
+
+La unidad es porcentaje del valor de banda por vela de 15 minutos. Para
+comparar ambas direcciones, el filtro usa s*prior_target_band_slope_pct.
+Se acepta cuando s*prior_target_band_slope_pct <= 0.03.
+No se usa valor absoluto: una banda superior descendente (UP) o una banda
+inferior ascendente (DOWN) da valor orientado negativo y se acepta. Una banda
+que se mueve rápidamente hacia el gap da valor orientado positivo y puede
+rechazarse.
+
+También se calcula el ancho porcentual de Bollinger en cada una de las
+últimas cinco velas y su pendiente lineal, en PUNTOS PORCENTUALES por vela:
+
+W[i] = (upper[i]-lower[i])/middle[i]*100
+prior_bb_width_change = pendiente_lineal(W[0..4] frente a i=0..4)
+
+El ancho debe cumplir prior_bb_width_pct <= 1.5, y la pendiente del ancho
+prior_bb_width_change <= 0.03 puntos porcentuales por vela. Una pendiente
+negativa del ancho se acepta. El campo prior_bb_width_growth_pct se calcula
+también, pero NO determina la selección ni el score actual; el filtro y el
+score usan prior_bb_width_change.
+
+5. REGLA DE LA LISTA PRELIMINAR AL ABRIR
+
+candidate_at_open = verdadero si, y sólo si, existen suficientes velas
+previas, existe opening_price y se cumplen TODAS estas condiciones:
+
+  abs(gap_pct) >= 1.0
+  prior_bb_width_pct <= 1.5
+  s*prior_target_band_slope_pct <= 0.03
+  prior_bb_width_change <= 0.03
+  distance_to_band_pct > 0 y distance_to_band_pct >= 0.50
+
+Si una métrica requerida no es finita, su condición falla. Los números de
+este bloque son los valores actuales de scanner_settings.py, no constantes
+financieras demostradas.
+
+IMPORTANTE: a los 10, 20 o 30 segundos NO se ha cerrado aún ninguna vela de
+1 minuto ni de 15 minutos del día actual. En ese momento se puede evaluar la
+pendiente PREVIA y el gap con la cotización recibida, pero NO el ángulo
+posterior de Bollinger ni la confirmación de la primera vela. No se deben
+atribuir esas mediciones futuras a una alerta de 09:30:10.
+
+6. BANDA DE 15 MINUTOS PROVISIONAL Y ÁNGULO POSTERIOR
+
+La temporalidad de Bollinger SIGUE siendo 15 minutos. Para conocer su
+evolución antes de las 09:45, sustituir provisionalmente el cierre aún
+desconocido de la primera vela de 15 minutos por el ÚLTIMO cierre de 1 minuto
+ya disponible. Calcular BB(20,2) con los últimos 19 cierres de 15 minutos
+previos más ese único cierre provisional. No calcular BB(20,2) directamente
+sobre 20 velas de 1 minuto.
+
+Para dos valores de la banda objetivo separados por delta_minutes:
+
+band_change_pct = (B_actual/B_anterior - 1)*100
+normalized_change_5m = band_change_pct * (5/delta_minutes)
+angle_raw_deg = degrees(atan(normalized_change_5m))
+target_angle_deg = s*angle_raw_deg
+
+El signo invertido para DOWN permite interpretar como positivo el movimiento
+de la banda inferior hacia abajo, es decir, persiguiendo un gap bajista.
+No se usa abs(). Un target_angle_deg negativo indica que la banda objetivo
+se cierra o se aleja del gap y es aceptable para el filtro de ángulo.
+Este ángulo es una medida numérica normalizada, no los grados visuales de
+una gráfica y no depende del zoom.
+
+09:30: B_anterior = banda objetivo de la última vela previa cerrada.
+09:31: B_actual = banda provisional con el cierre de la vela 09:30 de 1 min;
+       delta_minutes=1; el ángulo se guarda como target_angle_1m_deg.
+09:35: B_actual = banda provisional con el cierre de 09:34 de 1 min (en vivo)
+       o el cierre de la vela histórica 09:30 de 5 min, si se proporcionó;
+       delta_minutes=5 desde la banda 09:30; target_angle_5m_deg.
+09:40: se obtiene otro valor provisional con el cierre de 09:39 de 1 min
+       o de la vela histórica 09:35 de 5 min; se calcula ángulo 09:35–09:40.
+09:45: se usa el cierre definitivo de la primera vela de 15 min; se calcula
+       ángulo 09:40–09:45 cuando existe el valor 09:40.
+
+El umbral actual es target_angle_5m_deg <= 25.0 grados. Se aplica a UP y
+DOWN ya orientados por s. Un ángulo negativo pasa. Para gaps UP hay además
+una regla de pendiente de la banda superior de cinco minutos:
+
+five_min_band_slope_pct_per_min = (upper_0935/prior_upper - 1)*100/5
+Debe ser <= 0.15 % por minuto, sin abs(). Esta regla adicional NO se aplica
+a DOWN.
+
+7. LISTA DESDE LAS 09:35 Y CONFIRMACIÓN DE 1 MINUTO
+
+Cuando se conoce target_angle_5m_deg, candidate se recalcula con:
+
+  distancia exterior > 0 y >= 0.50 %
+  abs(gap_pct) >= 1.0 %
+  prior_bb_width_pct <= 1.5 %
+  prior_bb_width_change <= 0.03 puntos porcentuales por vela
+  target_angle_5m_deg <= 25.0 grados
+  y, sólo para UP, five_min_band_slope_pct_per_min <= 0.15.
+
+Detalle importante del código actual: desde las 09:35 el ángulo provisional
+SUSTITUYE al filtro de la pendiente previa de la banda objetivo. Por eso un
+símbolo puede no haber pasado candidate_at_open y sí pasar candidate después.
+El límite de expansión del ancho posterior está desactivado actualmente
+(maximum_post_open_bb_expansion_pct=None).
+
+La primera vela de 1 minuto permite calcular:
+
+first_minute_return_pct = (close_09:30/open_09:30 - 1)*100
+first_minute_reversal_pct = -s*first_minute_return_pct
+
+El campo confirmed se vuelve 1 si hay reversión positiva >= 0.10 %, el
+cierre sigue fuera de la banda objetivo previa y conserva al menos 0.50 %
+de distancia. confirmed NO es un filtro duro para candidate. El ángulo de
+09:31 participa en score_1m, pero el umbral de 25 grados NO elimina al
+símbolo de la lista preliminar durante el primer minuto.
+
+8. SCORE Y ORDENAMIENTO DE LA PANTALLA
+
+El score es parecido geométrico de 0 a 100, NO probabilidad de éxito. No hay
+un mínimo de score de 70 u 85 para entrar en la lista actual: los filtros
+booleanos anteriores determinan la pertenencia y el score determina el
+orden. Si distance_to_band_pct <= 0 o no es finita, score=0.
+
+En apertura se calculan estas calidades entre 0 y 1:
+
+q_gap = min(abs(gap_pct)/3, 1), peso 1
+q_distancia = min(distance_to_band_pct/2, 1), peso 2
+q_compresión = 1/(1 + max(prior_bb_width_pct,0)/2), peso 1
+q_ancho = 1/(1 + max(prior_bb_width_change,0)/0.05), peso 1
+
+score_open = redondear_a_1_decimal(
+    100*(1*q_gap + 2*q_distancia + 1*q_compresión + 1*q_ancho)/5
+)
+
+Después de abrir se agrega q_ángulo con peso 5, usando el ángulo disponible
+de la etapa. Su función exacta es:
+
+  si ángulo <= 0: q_ángulo=1
+  si 0 < ángulo <= 25: q_ángulo=1 - 0.6*ángulo/25
+  si 25 < ángulo < 70: q_ángulo=0.4*(70-ángulo)/(70-25)
+  si ángulo >= 70: q_ángulo=0
+
+Desde 09:31, si existe primera vela, se agrega con peso 0.25:
+q_reversión = min(max(first_minute_reversal_pct,0)/0.25, 1).
+
+Desde 09:45, si existe ancho posterior y ancho previo > 0:
+post_open_bb_expansion_pct =
+    (post_open_bb_width_pct/prior_bb_width_pct - 1)*100
+q_expansión = 1/(1 + max(post_open_bb_expansion_pct,0)/25), peso 0.75.
+
+En cualquier etapa se usa sólo el conjunto de calidades disponibles:
+score_etapa = redondear_a_1_decimal(
+    100*sum(peso_i*calidad_i)/sum(peso_i disponibles)
+)
+
+score_1m usa target_angle_1m_deg. score_5m usa target_angle_5m_deg.
+score_15m usa el MAYOR de los ángulos disponibles de 09:30–09:35,
+09:35–09:40 y 09:40–09:45; también incorpora la expansión posterior.
+La columna score muestra la etapa más reciente disponible. Los scores de
+distintas etapas pueden cambiar mucho porque entran nuevos componentes.
+
+En operativa diaria ANTES de las 09:35 ET, la lista visible usa
+candidate_at_open y se ordena por score_open descendente. Desde las 09:35
+usa candidate y el orden por score de la etapa más reciente descendente;
+los empates se ordenan por ticker. El historial muestra candidate con ese
+orden por score. La tabla diagnóstica contiene todos los símbolos analizados,
+incluso los que fallaron; failed_conditions explica los filtros fallidos.
+
+9. PSEUDOCÓDIGO MÍNIMO DE REPLICACIÓN
+
+para cada ticker del universo:
+    prior = últimas hasta 26 velas REGULARES de 15m de sesión previa
+    si len(prior) < 24: no candidato; continuar
+    calcular BB(20,2) sobre cierres de prior, con std(ddof=0)
+    obtener previous_close, prior_upper, prior_lower, prior_middle
+    obtener opening_price sólo si ya fue observado/recibido
+    gap_pct = (opening_price/previous_close - 1)*100
+    s = +1 si gap_pct >= 0, de lo contrario -1
+    calcular distancia exterior, ancho y pendientes previas como arriba
+    candidate_at_open = conjunción exacta de la sección 5
+    score_open = fórmula de la sección 8
+    conforme cierren las velas de 1m/5m/15m, actualizar bandas y ángulos
+    sin leer ninguna vela que todavía no haya cerrado
+    desde 09:35, candidate = conjunción exacta de la sección 7
+    mostrar únicamente la lista de la etapa temporal correspondiente
+
+Archivos de referencia de la implementación actual:
+config.py, scanner_settings.py, indicators.py, opening_scan.py,
+real_data.py, opening_live.py y app.py.
