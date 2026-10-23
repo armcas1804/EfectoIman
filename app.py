@@ -16,6 +16,7 @@ import streamlit as st
 import real_data
 from config import DATA_DIR, HISTORY_SESSION_LIMIT, TICKERS
 from daily_chart import build_daily_chart
+from home_chart import build_home_chart
 from daily_store import (export_history, initialize_daily_store,
                          load_daily_session, save_daily_session, session_dates)
 from outcomes import build_outcomes
@@ -551,6 +552,140 @@ def daily_panel() -> None:
     st.caption("El primer registro local indica cuándo terminó un cálculo desde que se activó "
                "esta versión; no reconstruye señales anteriores ni confirma cuándo se vio la pantalla.")
     session_view(setups, candles, f"daily_{day}", early, availability)
+
+
+def home_cut_changed() -> None:
+    """Una elección anterior pausa el avance automático hasta volver al último corte."""
+    available = st.session_state.get("home_available_cuts", ())
+    if available:
+        st.session_state.home_follow_latest = st.session_state.home_cut == max(available)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def home_minute_data(ticker: str, day: str) -> pd.DataFrame:
+    """Minutos recientes de una sola empresa para la vela 15m en formación."""
+    try:
+        bars, _ = real_data.download_bars(period="1d", tickers=(ticker,), interval="1m")
+        return bars.get(ticker, pd.DataFrame())
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.fragment(run_every="10s")
+def home_panel() -> None:
+    now = datetime.now(NY)
+    day = now.date().isoformat()
+    capture = opening_capture(day, CAPTURE_CACHE_VERSION)
+    capture.poll()
+    _, prior_candles, capture_status, _ = capture.snapshot()
+    windows = {}
+    for seconds in DISPLAY_WINDOWS:
+        setups, candles, ready_at = capture.snapshot_at(seconds)
+        if setups is None:
+            path = DATA_DIR / "snapshots" / f"diagnostico_apertura_{seconds}s_{day}.csv"
+            if path.exists():
+                setups = pd.read_csv(path)
+                candles = prior_candles
+        if setups is not None:
+            windows[seconds] = (setups, candles, ready_at)
+
+    st.markdown("<span class='eyebrow'>Home · apertura de mercado</span>"
+                "<div class='rule'></div>", unsafe_allow_html=True)
+    st.write("Explora las listas de apertura y sigue cada empresa en una gráfica de "
+             "15 minutos con Bandas de Bollinger.")
+    st.caption("Los resultados de cada corte quedan congelados. La gráfica incorpora "
+               "velas nuevas cuando el proveedor las publica; el score del corte no cambia.")
+    labels = {30: "30 segundos", 60: "1 minuto", 90: "1 minuto y medio"}
+    cut_cards = st.columns(3)
+    for seconds, card in zip(DISPLAY_WINDOWS, cut_cards):
+        with card:
+            st.metric(labels[seconds], "Disponible" if seconds in windows else "Pendiente")
+    if not windows:
+        st.info("Aún no hay listas de apertura para hoy. La primera se genera a las "
+                "09:30:30 de Nueva York si el proceso estaba activo y recibió cotizaciones.")
+        st.caption(capture_status)
+        return
+
+    available = tuple(windows)
+    latest = max(available)
+    if st.session_state.get("home_day") != day:
+        st.session_state.home_day = day
+        st.session_state.home_follow_latest = True
+        st.session_state.home_cut = latest
+    st.session_state.home_available_cuts = available
+    if (st.session_state.get("home_follow_latest", True) or
+            st.session_state.get("home_cut") not in available):
+        st.session_state.home_cut = latest
+        st.session_state.home_follow_latest = True
+    st.radio("Lista de apertura", available, format_func=lambda value: labels[value],
+             horizontal=True, key="home_cut", on_change=home_cut_changed)
+    seconds = st.session_state.home_cut
+    if st.session_state.home_follow_latest:
+        st.caption("Siguiendo automáticamente el corte más reciente. Puedes volver a uno anterior.")
+    else:
+        st.caption("Viendo un corte anterior. Elige el más reciente para retomar el avance automático.")
+
+    setups, frozen_candles, ready_at = windows[seconds]
+    observed = setups.loc[setups.opening_price.notna()].copy()
+    candidates = observed.loc[observed.candidate_at_open == True].sort_values(
+        ["score_open", "ticker"], ascending=[False, True])
+    st.markdown(f"### Lista de {labels[seconds]}")
+    cut_clock = {30: "09:30:30", 60: "09:31:00", 90: "09:31:30"}[seconds]
+    st.caption(f"{day} · corte {cut_clock} ET · "
+               f"{len(observed)} símbolos con precio · {len(candidates)} candidatos"
+               + (f" · calculado {ready_at:%H:%M:%S} ET" if ready_at else ""))
+    if candidates.empty:
+        st.info("Este corte no produjo candidatos. Revisa los diagnósticos completos abajo.")
+    else:
+        st.dataframe(candidates.reindex(columns=[
+            "ticker", "score_open", "gap_pct", "gap_direction",
+            "distance_to_band_pct", "target_angle_cutoff_deg", "opening_price"]),
+            hide_index=True, width="stretch", column_config={
+                "ticker": "Empresa", "score_open": "Score del corte",
+                "gap_pct": st.column_config.NumberColumn("Gap %", format="%+.2f"),
+                "gap_direction": "Dirección",
+                "distance_to_band_pct": st.column_config.NumberColumn(
+                    "Fuera de Bollinger %", format="%+.2f"),
+                "target_angle_cutoff_deg": st.column_config.NumberColumn(
+                    "Ángulo del corte", format="%+.1f°"),
+                "opening_price": st.column_config.NumberColumn("Precio del corte", format="%.2f"),
+            })
+    with st.expander(f"Ver diagnóstico completo ({len(observed)} símbolos)"):
+        st.dataframe(observed.reindex(columns=OPENING_WINDOW_COLUMNS),
+                     hide_index=True, width="stretch")
+
+    choices = candidates.ticker.tolist()
+    if not choices:
+        return
+    selected = st.selectbox("Ver gráfica de una empresa", choices, index=None,
+                            placeholder="Selecciona una empresa", key=f"home_company_{day}_{seconds}")
+    if selected is None:
+        return
+    row = candidates.loc[candidates.ticker == selected].iloc[0]
+    refresher = market_refresh(day, 2)
+    market_window = (now.weekday() < 5 and (9, 31) <= (now.hour, now.minute) <= (16, 15))
+    if market_window:
+        refresher.start()
+    _, session_candles, updated = load_daily_session(day)
+    chart_candles = session_candles
+    if (chart_candles.empty or selected not in set(chart_candles.ticker)) and frozen_candles is not None:
+        chart_candles = frozen_candles
+    if chart_candles.empty or selected not in set(chart_candles.ticker):
+        st.info("Faltan velas previas de 15 minutos para dibujar esta empresa.")
+        return
+    minutes = home_minute_data(selected, day) if market_window else pd.DataFrame()
+    st.plotly_chart(build_home_chart(
+        chart_candles, selected, seconds, float(row.opening_price),
+        float(row.cutoff_bb_upper), float(row.cutoff_bb_lower), float(row.gap_pct),
+        minutes, now),
+        width="stretch", config={"displaylogo": False,
+                                 "modeBarButtonsToRemove": ["lasso2d", "select2d"]})
+    st.caption("Puntos claros: Bollinger provisional calculado con el precio recibido "
+               f"hasta {cut_clock} ET. Las velas son de 15 minutos; el punto del corte "
+               "no representa una vela completa. La vela tenue en formación, cuando hay "
+               "minutos completos disponibles, también usa BB(20,2) de 15 minutos. "
+               + (f"Última descarga de velas: {updated}." if updated else
+                  "Todavía no hay velas posteriores guardadas."))
 
 
 def historical_panel() -> None:
@@ -1492,7 +1627,7 @@ def main() -> None:
         st.session_state.selected_charts = []
     style()
     st.sidebar.markdown("## Efecto Imán")
-    page = st.sidebar.radio("NAVEGACIÓN", ("Operativa diaria", "Historial",
+    page = st.sidebar.radio("NAVEGACIÓN", ("Home", "Operativa diaria", "Historial",
                                             "Historial prueba", "Revisión manual"),
                             label_visibility="collapsed")
     st.sidebar.caption("Gaps alcistas y bajistas · reversión hacia Bollinger")
@@ -1500,7 +1635,9 @@ def main() -> None:
     st.title("Efecto Imán")
     st.caption("Estudio diagnóstico · Bandas de Bollinger de 15 minutos")
     market_clock(page)
-    if page == "Operativa diaria":
+    if page == "Home":
+        home_panel()
+    elif page == "Operativa diaria":
         daily_panel()
     elif page == "Historial":
         historical_panel()

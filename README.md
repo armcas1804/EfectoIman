@@ -87,6 +87,19 @@ segundos: las apps gratuitas pueden hibernar cuando no reciben visitas y
 reiniciarse; el corte en vivo exige un proceso activo antes de la apertura.
 La instalación local sigue siendo la fuente de las capturas de apertura.
 
+## Home
+
+La página inicial muestra los candidatos de los cortes guardados a los 30,
+60 y 90 segundos. Avanza al corte más reciente en cuanto esté disponible;
+puedes seleccionar uno anterior y volver al último para retomar el avance
+automático. La tabla conserva el score de su corte. Al elegir una empresa se
+muestran velas de 15 minutos cerradas, sus BB(20,2) y el precio y las bandas
+provisionales observados en ese corte. Durante el mercado, si llegan minutos
+completos del proveedor, la vela de 15 minutos en formación se muestra tenue
+con bandas provisionales recalculadas. La gráfica indica la hora de la última
+descarga de velas. Los cortes sólo aparecen en la instancia que los capturó o
+en la que estén guardados sus archivos; la nube no comparte la carpeta local.
+
 ## Revisión manual de gráficas
 
 La sección **Revisión manual** muestra por defecto los candidatos guardados de
