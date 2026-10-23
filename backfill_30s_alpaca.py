@@ -1,4 +1,4 @@
-"""Completa cortes históricos de 10, 20 y 30 s con operaciones SIP de Alpaca.
+"""Completa cortes históricos cada 10 s hasta 30 o 60 s con operaciones SIP.
 
 Requiere APCA_API_KEY_ID y APCA_API_SECRET_KEY en el entorno. Los tiempos
 históricos son de mercado; no prueban cuándo habrían llegado al equipo.
@@ -25,7 +25,8 @@ TRAJECTORY_COLUMNS = ("date", "ticker", "second_after_open", "last_trade_at_et",
                       "price", "trade_count")
 
 
-def summarize_windows(day: str, trades_by_symbol: dict) -> pd.DataFrame:
+def summarize_windows(day: str, trades_by_symbol: dict,
+                      max_seconds: int = 30) -> pd.DataFrame:
     opened = datetime.combine(date.fromisoformat(day), clock_time(9, 30), NY)
     records = []
     for ticker, trades in trades_by_symbol.items():
@@ -39,10 +40,10 @@ def summarize_windows(day: str, trades_by_symbol: dict) -> pd.DataFrame:
             except (KeyError, TypeError, ValueError):
                 continue
             elapsed = (stamp.astimezone(NY) - opened).total_seconds()
-            if 0 <= elapsed <= 30 and price > 0:
+            if 0 <= elapsed <= max_seconds and price > 0:
                 valid.append((stamp, price, elapsed))
         valid.sort(key=lambda item: item[0])
-        for seconds in (10, 20, 30):
+        for seconds in range(10, max_seconds + 1, 10):
             eligible = [trade for trade in valid if trade[2] <= seconds]
             if not eligible:
                 continue
@@ -60,7 +61,8 @@ def summarize_windows(day: str, trades_by_symbol: dict) -> pd.DataFrame:
         ["ticker", "window_seconds"]).reset_index(drop=True)
 
 
-def summarize_trajectory(day: str, trades_by_symbol: dict) -> pd.DataFrame:
+def summarize_trajectory(day: str, trades_by_symbol: dict,
+                         max_seconds: int = 30) -> pd.DataFrame:
     """Un precio observado por segundo: último negocio de ese segundo."""
     opened = datetime.combine(date.fromisoformat(day), clock_time(9, 30), NY)
     buckets = {}
@@ -74,7 +76,7 @@ def summarize_trajectory(day: str, trades_by_symbol: dict) -> pd.DataFrame:
             except (KeyError, TypeError, ValueError):
                 continue
             elapsed = (stamp.astimezone(NY) - opened).total_seconds()
-            if 0 <= elapsed <= 30 and price > 0:
+            if 0 <= elapsed <= max_seconds and price > 0:
                 key = (ticker, int(elapsed))
                 bucket = buckets.setdefault(key, [])
                 bucket.append((stamp, price))
@@ -87,11 +89,12 @@ def summarize_trajectory(day: str, trades_by_symbol: dict) -> pd.DataFrame:
 
 
 def fetch_day(session: requests.Session, day: str,
-              symbols: tuple[str, ...] = TRADE_SYMBOLS) -> tuple[pd.DataFrame, pd.DataFrame]:
+              symbols: tuple[str, ...] = TRADE_SYMBOLS,
+              max_seconds: int = 30) -> tuple[pd.DataFrame, pd.DataFrame]:
     opened = datetime.combine(date.fromisoformat(day), clock_time(9, 30), NY)
     params = {"symbols": ",".join(symbols),
               "start": opened.astimezone(timezone.utc).isoformat(),
-              "end": (opened + timedelta(seconds=30)).astimezone(timezone.utc).isoformat(),
+              "end": (opened + timedelta(seconds=max_seconds)).astimezone(timezone.utc).isoformat(),
               "feed": "sip", "sort": "asc", "limit": 10000}
     gathered: dict[str, list] = {}
     seen_tokens = set()
@@ -112,7 +115,8 @@ def fetch_day(session: requests.Session, day: str,
             gathered.setdefault(ticker, []).extend(trades)
         token = payload.get("next_page_token")
         if not token:
-            return summarize_windows(day, gathered), summarize_trajectory(day, gathered)
+            return (summarize_windows(day, gathered, max_seconds),
+                    summarize_trajectory(day, gathered, max_seconds))
         if token in seen_tokens:
             raise RuntimeError("Paginación repetida; se descarta este día incompleto")
         seen_tokens.add(token)
@@ -125,6 +129,7 @@ def main() -> None:
     parser.add_argument("--days", type=int, default=HISTORY_SESSION_LIMIT)
     parser.add_argument("--date", type=date.fromisoformat)
     parser.add_argument("--refresh", action="store_true")
+    parser.add_argument("--seconds", type=int, choices=(30, 60), default=30)
     args = parser.parse_args()
     key = os.environ.get("APCA_API_KEY_ID")
     secret = os.environ.get("APCA_API_SECRET_KEY")
@@ -139,7 +144,7 @@ def main() -> None:
         session.headers.update({"APCA-API-KEY-ID": key,
                                 "APCA-API-SECRET-KEY": secret})
         for day in days:
-            output = folder / f"apertura_historica_30s_{day}.csv"
+            output = folder / f"apertura_historica_{args.seconds}s_{day}.csv"
             if output.exists() and not args.refresh:
                 print(f"{day}: ya guardado", flush=True)
                 continue
@@ -148,11 +153,11 @@ def main() -> None:
                 print(f"{day}: corte SIP demasiado reciente", flush=True)
                 continue
             try:
-                frame, trajectory = fetch_day(session, day)
+                frame, trajectory = fetch_day(session, day, max_seconds=args.seconds)
             except (requests.RequestException, ValueError, RuntimeError) as exc:
                 print(f"{day}: descarga incompleta ({type(exc).__name__}: {exc})", flush=True)
                 continue
-            trajectory_output = folder / f"apertura_historica_trayectoria_30s_{day}.csv"
+            trajectory_output = folder / f"apertura_historica_trayectoria_{args.seconds}s_{day}.csv"
             trajectory_temporary = trajectory_output.with_suffix(".csv.tmp")
             trajectory.to_csv(trajectory_temporary, index=False)
             trajectory_temporary.replace(trajectory_output)
@@ -160,8 +165,9 @@ def main() -> None:
             frame.to_csv(temporary, index=False)
             temporary.replace(output)
             counts = frame.groupby("window_seconds").ticker.nunique().to_dict()
-            print(f"{day}: 10 s={counts.get(10, 0)}, 20 s={counts.get(20, 0)}, "
-                  f"30 s={counts.get(30, 0)} símbolos", flush=True)
+            print(f"{day}: " + ", ".join(
+                f"{second} s={counts.get(second, 0)}"
+                for second in range(10, args.seconds + 1, 10)) + " símbolos", flush=True)
 
 
 if __name__ == "__main__":

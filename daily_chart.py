@@ -47,16 +47,17 @@ def build_daily_chart(candles: pd.DataFrame, ticker: str, gap_pct: float,
         opening_price = float(series.iloc[-1].close) * (1 + gap_pct / 100)
         figure.add_annotation(x=first_index, y=opening_price, text=f"Gap {gap_pct:+.2f}%",
                               showarrow=True, arrowhead=2, ay=-35, bgcolor="#f7f7f7")
-    if cutoff_seconds in (30, 60) and current.empty and pd.notna(cutoff_price):
-        label = "30 s" if cutoff_seconds == 30 else "1 min"
-        figure.add_trace(go.Scatter(x=[first_index], y=[cutoff_price],
+    if cutoff_seconds in (20, 30, 60) and pd.notna(cutoff_price):
+        label = "1 min" if cutoff_seconds == 60 else f"{cutoff_seconds} s"
+        cutoff_x = first_index - .43 if not current.empty else first_index
+        figure.add_trace(go.Scatter(x=[cutoff_x], y=[cutoff_price],
                                     mode="markers+text", text=[label],
                                     textposition="top right", name=f"Precio {label}",
                                     marker=dict(size=11, color="#aa3535")))
         for band_name, band_price, color in (("Superior provisional", cutoff_upper, "#272727"),
                                               ("Inferior provisional", cutoff_lower, "#777777")):
             if pd.notna(band_price):
-                figure.add_trace(go.Scatter(x=[first_index], y=[band_price],
+                figure.add_trace(go.Scatter(x=[cutoff_x], y=[band_price],
                                             mode="markers", name=f"{band_name} {label}",
                                             marker=dict(size=9, color=color, symbol="diamond")))
     if pd.notna(first_minute_close):
@@ -87,7 +88,7 @@ def build_daily_chart(candles: pd.DataFrame, ticker: str, gap_pct: float,
     ticks = series.iloc[sorted(tick_indexes)]
     figure.update_layout(
         title=dict(text=f"{ticker}  /  15 MIN  /  {target_band}" +
-                   (f"  /  CORTE {cutoff_seconds} S" if cutoff_seconds in (30, 60) else ""),
+                   (f"  /  CORTE {cutoff_seconds} S" if cutoff_seconds in (20, 30, 60) else ""),
                    font=dict(family="Georgia, serif", size=17)),
         height=355, margin=dict(l=12, r=12, t=52, b=20),
         paper_bgcolor="#f7f7f7", plot_bgcolor="#f7f7f7", font=dict(color="#333333", size=11),

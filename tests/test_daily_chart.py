@@ -8,6 +8,27 @@ from daily_chart import build_daily_chart
 
 
 class DailyChartTests(unittest.TestCase):
+    def test_twenty_second_marker_is_visible_with_historical_session_candles(self):
+        candles = pd.DataFrame([{
+            "ticker": "AAL", "bar_index": index,
+            "session": "PREVIA" if index < 25 else "ACTUAL",
+            "time": "15:45" if index < 25 else "09:30",
+            "open": 100.0 if index < 25 else 102.0,
+            "high": 101.0 if index < 25 else 103.0,
+            "low": 99.0 if index < 25 else 101.0,
+            "close": 100.0 if index < 25 else 102.5,
+        } for index in range(26)])
+        chart = build_daily_chart(candles, "AAL", 2.0, -1, float("nan"),
+                                  cutoff_seconds=20, cutoff_price=102.2,
+                                  cutoff_upper=101.4, cutoff_lower=98.6,
+                                  focus_opening=True)
+        traces = {trace.name: trace for trace in chart.data}
+
+        self.assertIn("CORTE 20 S", chart.layout.title.text)
+        self.assertEqual(float(traces["Precio 20 s"].y[0]), 102.2)
+        self.assertEqual(float(traces["Superior provisional 20 s"].y[0]), 101.4)
+        self.assertLess(float(traces["Precio 20 s"].x[0]), 25)
+
     def test_opening_focus_keeps_four_prior_and_eight_current_candles(self):
         candles = pd.DataFrame([
             {

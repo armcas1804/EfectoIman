@@ -4,6 +4,7 @@ import io
 import importlib
 import math
 import time
+from pathlib import Path
 from html import escape
 import zipfile
 from datetime import date, datetime
@@ -18,22 +19,24 @@ from daily_chart import build_daily_chart
 from daily_store import (export_history, initialize_daily_store,
                          load_daily_session, save_daily_session, session_dates)
 from outcomes import build_outcomes
-from opening_live import CaptureProgress, OpeningCapture, next_capture_day
+from opening_live import CaptureProgress, DISPLAY_WINDOWS, OpeningCapture, next_capture_day
 from market_refresh import MarketRefresh
 from manual_review import (LABELS, build_early_chart, early_features,
                            early_trajectory,
                            early_observations, load_reviews, save_review)
 from signal_audit import first_availability
+from scanner_settings import DEFAULT_THRESHOLDS
 from subminute_history import ten_second_coverage
 
 
 NY = ZoneInfo("America/New_York")
 HERMOSILLO = ZoneInfo("America/Hermosillo")
 MAX_CHARTS = 4
-CAPTURE_CACHE_VERSION = 5
+CAPTURE_CACHE_VERSION = 7
 OPENING_WINDOW_COLUMNS = ["ticker", "score_open", "gap_pct", "gap_direction",
                           "opening_price", "cutoff_bb_upper", "cutoff_bb_lower",
                           "distance_to_band_pct", "target_angle_cutoff_deg",
+                          "score_cutoff_expansion_component",
                           "angle_cutoff_event_span_seconds", "candidate_at_open",
                           "failed_conditions", "pending_conditions"]
 DISPLAY_COLUMNS = [
@@ -53,7 +56,7 @@ DISPLAY_COLUMNS = [
     "score_gap_component", "score_distance_component",
     "score_compression_component", "score_prior_width_growth_component",
     "score_target_angle_component", "score_first_minute_component",
-    "score_post_open_expansion_component",
+    "score_post_open_expansion_component", "score_cutoff_expansion_component",
     "first_minute_return_pct", "first_minute_body_pct", "first_minute_reversal_pct",
     "post_open_bb_width_pct", "post_open_bb_width_change", "post_open_bb_expansion_pct",
     "post_open_target_band_slope_pct", "distance_to_band_after_15m",
@@ -120,19 +123,30 @@ def capture_message(now: datetime, capture: OpeningCapture,
     cut_hmo = capture.cutoff.astimezone(HERMOSILLO).strftime("%H:%M:%S")
     thirty = capture.opened_at.replace(second=30)
     minute = capture.opened_at.replace(minute=31, second=0)
+    minute_and_half = capture.opened_at.replace(minute=31, second=30)
     ready_windows = progress.window_ready_at or {}
     window_counts = progress.window_counts or {}
     window_candidates = progress.window_candidates or {}
     if now.weekday() >= 5:
         return "", "Hoy no hay apertura programada. Abre Operativa diaria antes de las 09:25 ET del próximo día hábil."
+    if 90 in ready_windows:
+        ready = ready_windows[90].astimezone(NY)
+        if not window_counts.get(90, 0):
+            return "error", "Corte de 1 minuto y medio completado sin cotizaciones válidas."
+        return "ready", (f"Lista de 1 minuto y medio lista a las {ready:%H:%M:%S} ET: "
+                         f"{window_counts.get(90, 0)}/{total} cotizaciones; "
+                         f"{window_candidates.get(90, 0)} candidatos. "
+                         "Se guardaron por separado los cortes de 30, 60 y 90 s.")
     if 60 in ready_windows:
         ready = ready_windows[60].astimezone(NY)
         if not window_counts.get(60, 0):
             return "error", "Corte de 1 minuto completado sin cotizaciones válidas."
-        return "ready", (f"Lista de 1 minuto lista a las {ready:%H:%M:%S} ET: "
-                         f"{window_counts.get(60, 0)}/{total} cotizaciones; "
-                         f"{window_candidates.get(60, 0)} candidatos. "
-                         "Se guardaron por separado los cortes de 30 s y 1 min.")
+        remaining = max(0, math.ceil((minute_and_half - now).total_seconds()))
+        next_status = (f"Actualización de 1 minuto y medio en {remaining} s."
+                       if remaining else "Calculando la actualización de 1 minuto y medio.")
+        return "active", (f"Lista de 1 minuto lista a las {ready:%H:%M:%S} ET: "
+                          f"{window_counts.get(60, 0)}/{total} cotizaciones; "
+                          f"{window_candidates.get(60, 0)} candidatos. " + next_status)
     if 30 in ready_windows:
         ready = ready_windows[30].astimezone(NY)
         remaining = max(0, math.ceil((minute - now).total_seconds()))
@@ -176,7 +190,10 @@ def capture_message(now: datetime, capture: OpeningCapture,
         return "error", "La aplicación se inició después de los cortes de apertura."
     if progress.prior_error:
         return "error", "No hay bandas previas; no se pudieron calcular los cortes de apertura."
-    return "active", "Corte de 1 minuto alcanzado. Calculando y guardando las dos listas."
+    if now < minute_and_half:
+        return "active", ("Corte de 1 minuto alcanzado. Calculando gap y Bollinger "
+                          "provisional; el flujo sigue hasta 09:31:30 ET.")
+    return "active", "Corte de 1 minuto y medio alcanzado. Calculando la tercera lista."
 
 
 @st.fragment(run_every="1s", parallel=True)
@@ -251,7 +268,8 @@ def refresh_real(days: int = 1) -> tuple[int, int, tuple[str, ...], int]:
 
 def setup_list(setups: pd.DataFrame, key: str,
                availability: dict[str, tuple[str, str]] | None = None,
-               preliminary: bool = False) -> None:
+               preliminary: bool = False, trial: bool = False,
+               trial_seconds: int = 10) -> None:
     if setups.empty:
         st.info("No hay candidatos con los límites exploratorios actuales.")
         return
@@ -259,9 +277,12 @@ def setup_list(setups: pd.DataFrame, key: str,
         cols = st.columns([1.5, 1, .6], vertical_alignment="center")
         cols[0].write(f"**{row.ticker}** · {row.gap_direction}")
         shown_score = row.score_open if preliminary else row.score
-        cols[0].caption(f"Score {'apertura' if preliminary else 'actual'} {shown_score:.1f} · "
+        shown_distance = row.trial_distance_10s_pct if trial else row.distance_to_band_pct
+        score_name = (f"modelo a {trial_seconds} s" if trial else
+                      "apertura" if preliminary else "actual")
+        cols[0].caption(f"Score {score_name} {shown_score:.1f} · "
                         f"banda {row.target_band} · "
-                        f"distancia {row.distance_to_band_pct:+.2f}%")
+                        f"distancia {shown_distance:+.2f}%")
         if availability and row.ticker in availability:
             recorded, source = availability[row.ticker]
             cols[0].caption(f"Primer registro local {recorded[11:19]} ET · {source}")
@@ -270,17 +291,23 @@ def setup_list(setups: pd.DataFrame, key: str,
         if preliminary and pd.notna(row.target_angle_cutoff_deg):
             cols[0].caption(f"Ángulo dentro del corte {row.target_angle_cutoff_deg:+.1f}° · "
                             f"{row.angle_cutoff_event_span_seconds:.0f} s entre precios")
-        angles = [value for value in (row.target_angle_5m_deg,
-                  row.target_angle_0935_0940, row.target_angle_0940_0945)
-                  if pd.notna(value)]
+        if trial:
+            angles = ([row.trial_angle_10s_deg]
+                      if pd.notna(row.trial_angle_10s_deg) else [])
+        else:
+            angles = [value for value in (row.target_angle_5m_deg,
+                      row.target_angle_0935_0940, row.target_angle_0940_0945)
+                      if pd.notna(value)]
         if angles:
-            detail = f"Ángulo inicial {angles[0]:+.1f}°"
+            detail = (f"Ángulo dentro de {trial_seconds} s {angles[0]:+.1f}°" if trial
+                      else f"Ángulo inicial {angles[0]:+.1f}°")
             if len(angles) > 1:
                 detail += f" · máximo 15m {max(angles):+.1f}°"
-            if pd.notna(row.post_open_bb_expansion_pct):
+            if not trial and pd.notna(row.post_open_bb_expansion_pct):
                 detail += f" · ancho {row.post_open_bb_expansion_pct:+.1f}%"
             cols[0].caption(detail)
-        cols[1].write(f"{row.gap_pct:+.2f}%")
+        shown_gap = row.trial_gap_10s_pct if trial else row.gap_pct
+        cols[1].write(f"{shown_gap:+.2f}%")
         if cols[2].button("+", key=f"{key}_{row.ticker}", help=f"Mostrar u ocultar {row.ticker}"):
             chosen = st.session_state.selected_charts
             if row.ticker in chosen:
@@ -318,17 +345,42 @@ def charts(setups: pd.DataFrame, candles: pd.DataFrame) -> None:
             cutoff_upper=float(setup.cutoff_bb_upper)
             if pd.notna(setup.cutoff_bb_upper) else float("nan"),
             cutoff_lower=float(setup.cutoff_bb_lower)
-            if pd.notna(setup.cutoff_bb_lower) else float("nan")),
+            if pd.notna(setup.cutoff_bb_lower) else float("nan"),
+            focus_opening=cutoff_seconds == 20),
             width="stretch", config={"displayModeBar": False})
 
 
-def diagnostic_table(setups: pd.DataFrame) -> None:
+def diagnostic_table(setups: pd.DataFrame, trial: bool = False,
+                     trial_seconds: int = 10) -> None:
     if setups.empty:
         st.info("Aún no hay observaciones de esta sesión.")
         return
-    st.dataframe(setups.reindex(columns=DISPLAY_COLUMNS), hide_index=True, width="stretch",
+    columns = (['ticker', 'score', 'trial_signal_status',
+                'trial_failed_conditions_10s', 'trial_candidate',
+                'manual_label', 'trial_gap_10s_pct', 'trial_distance_10s_pct',
+                'trial_angle_10s_deg', 'trial_score_actual_10s',
+                'trial_score_final_original', 'early_data_status'] +
+               (['model_training_example'] if trial_seconds == 20 else [])
+               if trial else DISPLAY_COLUMNS)
+    st.dataframe(setups.reindex(columns=columns), hide_index=True, width="stretch",
                  column_config={
-                     "score": st.column_config.NumberColumn("Score actual", format="%.1f"),
+                     "score": st.column_config.NumberColumn(
+                         f"Score modelo {trial_seconds} s" if trial else "Score actual",
+                         format="%.1f"),
+                     "trial_score_actual_10s": f"Score heurístico {trial_seconds} s",
+                     "trial_model_score_raw_10s": f"Índice bruto modelo {trial_seconds} s",
+                     "trial_score_final_original": "Score posterior (referencia)",
+                     "trial_score_difference_10s": f"Diferencia a {trial_seconds} s",
+                     "trial_signal_status": f"Estado a {trial_seconds} s",
+                     "trial_failed_conditions_10s": (
+                         "Motivo sin señal 20 s" if trial_seconds == 20
+                         else "Por qué no entra al scanner"),
+                     "trial_gap_10s_pct": f"Gap a {trial_seconds} s",
+                     "trial_distance_10s_pct": f"Distancia a {trial_seconds} s",
+                     "trial_angle_10s_deg": f"Ángulo a {trial_seconds} s",
+                     "trial_candidate": "Señal del modelo" if trial_seconds == 20 else
+                                        "Candidato estricto",
+                     "model_training_example": "Juicio usado para entrenar",
                      "score_open": st.column_config.NumberColumn("Score apertura preliminar",
                                                                    format="%.1f"),
                      "score_5m": st.column_config.NumberColumn("Score con ángulo 09:35",
@@ -336,7 +388,23 @@ def diagnostic_table(setups: pd.DataFrame) -> None:
                      "failed_conditions": "Condiciones fallidas",
                      "pending_conditions": "Pendientes",
                  })
-    st.caption("En cada corte subminuto la distancia usa Bollinger provisional de 15 min; "
+    if trial:
+        st.caption("La puntuación de esta tabla usa sólo precios y bandas disponibles "
+                   f"hasta {trial_seconds} s. El score posterior se muestra como "
+                   "referencia y no interviene en la selección del modelo.")
+        with st.expander("Comparación técnica y todas las métricas"):
+            technical = ['ticker', 'trial_model_score_raw_10s',
+                         'trial_score_difference_10s'] + [
+                             column for column in DISPLAY_COLUMNS if column != 'ticker']
+            st.dataframe(setups.reindex(columns=technical), hide_index=True,
+                         width="stretch")
+            st.caption("El índice bruto del clasificador también existe para precios "
+                       "dentro de Bollinger; no es una señal ni una probabilidad "
+                       f"calibrada. El score heurístico de {trial_seconds} s vale cero "
+                       "cuando el precio está dentro de la banda. Las métricas de 1, "
+                       "5 y 15 minutos describen lo ocurrido después.")
+    else:
+        st.caption("En cada corte subminuto la distancia usa Bollinger provisional de 15 min; "
                "el ángulo dentro del corte sólo se valora si llegaron dos precios con horas distintas. "
                "A las 09:35 se valora el ángulo inicial; "
                "desde las 09:45 se valora el mayor ángulo de los tres tramos de cinco minutos "
@@ -345,7 +413,9 @@ def diagnostic_table(setups: pd.DataFrame) -> None:
 
 def session_view(setups: pd.DataFrame, candles: pd.DataFrame, key: str,
                  preliminary: bool = False,
-                 availability: dict[str, tuple[str, str]] | None = None) -> None:
+                 availability: dict[str, tuple[str, str]] | None = None,
+                 trial: bool = False, trial_score_list: bool = False,
+                 trial_seconds: int = 10) -> None:
     observed = setups.loc[setups.opening_price.notna()] if not setups.empty else setups
     candidates = observed.loc[observed.candidate_at_open == True] if preliminary else (
         observed.loc[observed.candidate == True])
@@ -353,25 +423,27 @@ def session_view(setups: pd.DataFrame, candles: pd.DataFrame, key: str,
         candidates = candidates.sort_values("score_open", ascending=False)
     metrics = st.columns(4)
     metrics[0].metric("Símbolos con apertura", len(observed))
-    metrics[1].metric("Preliminares" if preliminary else "Candidatos", len(candidates))
+    metrics[1].metric("Señales para revisar" if trial_score_list else
+                      "Preliminares" if preliminary else "Candidatos", len(candidates))
     metrics[2].metric("Toques de banda", int(observed.touched_target_band.fillna(False).sum())
                       if not observed.empty else 0)
     metrics[3].metric("Banda aún separada al toque", int(
         ((observed.touched_target_band == True) &
          (observed.reversion_to_touch_band_pct > 0)).sum()) if not observed.empty else 0)
     st.subheader("Diagnóstico de apertura")
-    diagnostic_table(setups)
+    diagnostic_table(setups, trial, trial_seconds)
     st.caption("Un toque puede ocurrir porque la banda se desplaza hasta la apertura. "
                "La columna «band_at_or_beyond_open_at_touch» separa esos casos; "
                "un toque no demuestra rentabilidad.")
-    st.subheader("Candidatos y gráficas")
+    st.subheader("Señales para revisar y gráficas" if trial_score_list else
+                 "Candidatos y gráficas")
     if preliminary:
         st.caption("Hasta las 09:35 ET se muestra la lista preliminar de apertura, ordenada "
                    "por score de apertura. El ángulo posterior aún no confirma estos casos; "
                    "una entrada puede haber tocado la banda antes de que llegue una actualización.")
     left, right = st.columns([.95, 1.75], gap="medium")
     with left:
-        setup_list(candidates, key, availability, preliminary)
+        setup_list(candidates, key, availability, preliminary, trial, trial_seconds)
     with right:
         charts(setups, candles)
     touched = candidates.loc[candidates.touched_target_band == True]
@@ -393,7 +465,7 @@ def daily_panel() -> None:
     capture.poll()
     cut_setups, cut_candles, capture_status, _ = capture.snapshot()
     windows = {}
-    for seconds in (30, 60):
+    for seconds in DISPLAY_WINDOWS:
         window_setups, window_candles, ready_at = capture.snapshot_at(seconds)
         if window_setups is None:
             path = DATA_DIR / "snapshots" / f"diagnostico_apertura_{seconds}s_{day}.csv"
@@ -425,15 +497,17 @@ def daily_panel() -> None:
             st.write(", ".join(refresh_missing))
     if windows:
         st.subheader("Listas congeladas de apertura")
-        for seconds in (30, 60):
+        for seconds in DISPLAY_WINDOWS:
             if seconds not in windows:
                 continue
             window_setups, _, ready_at = windows[seconds]
             chosen = window_setups.loc[window_setups.candidate_at_open == True].sort_values(
                 "score_open", ascending=False)
-            label = "30 segundos" if seconds == 30 else "1 minuto"
+            label = {30: "30 segundos", 60: "1 minuto",
+                     90: "1 minuto y medio"}[seconds]
             with st.expander(f"{label}: {len(chosen)} candidatos", expanded=False):
-                cut_time = "09:30:30" if seconds == 30 else "09:31:00"
+                cut_time = {30: "09:30:30", 60: "09:31:00",
+                            90: "09:31:30"}[seconds]
                 ready_text = (f"cálculo terminado a las {ready_at:%H:%M:%S} ET"
                               if ready_at else "cargado del archivo local")
                 st.caption(f"Corte {cut_time} ET · {ready_text}")
@@ -444,14 +518,14 @@ def daily_panel() -> None:
                                    file_name=f"candidatos_apertura_{seconds}s_{day}.csv",
                                    mime="text/csv", key=f"download_open_{seconds}_{day}")
     else:
-        st.caption("Las listas de 30 segundos y 1 minuto aparecerán cuando "
+        st.caption("Las listas de 30 segundos, 1 minuto y 1 minuto y medio aparecerán cuando "
                    "se congelen sus respectivos cortes.")
     if cut_setups is not None:
         with st.expander("Corte de 10 segundos conservado para auditoría"):
             st.dataframe(cut_setups.reindex(columns=OPENING_WINDOW_COLUMNS),
                          hide_index=True, width="stretch")
     early = market_window and (now.hour, now.minute) < (9, 35)
-    active_window = (60 if 60 in windows else 30 if 30 in windows else None)
+    active_window = max(windows) if windows else None
     if early and active_window is not None:
         setups, prior_candles, _ = windows[active_window]
         candles = (prior_candles if prior_candles is not None else
@@ -465,10 +539,10 @@ def daily_panel() -> None:
                 "La lista de 10 segundos no se usa como lista activa.")
         return
     elif early:
-        st.warning("No hay lista guardada de 30 s ni de 1 min; se muestran "
+        st.warning("No hay lista guardada de 30, 60 ni 90 s; se muestran "
                    "las velas posteriores disponibles.")
     if not updated and not windows:
-        st.info("Los cortes de 30 segundos y 1 minuto aún no están disponibles. "
+        st.info("Los cortes de 30 segundos, 1 minuto y 1 minuto y medio aún no están disponibles. "
                 "Mantén la aplicación abierta antes de las 09:25 ET.")
         return
     if not market_window:
@@ -527,6 +601,501 @@ def historical_panel() -> None:
                                mime="application/zip")
 
 
+def trial_session_setups(setups: pd.DataFrame, day_rows: pd.DataFrame,
+                         score_list: bool = False,
+                         model_20s: bool = False,
+                         max_signals: int | None = None,
+                         min_gap_pct: float = 0.0) -> pd.DataFrame:
+    """Misma estructura de Historial; sólo sustituye score y selección de prueba."""
+    trial = day_rows.set_index("ticker")
+    result = setups.copy()
+    result["trial_score_final_original"] = result.score
+    if model_20s:
+        mapping = (
+            ("score", "model_score_20s"),
+            ("trial_model_score_raw_10s", "model_index_raw_20s"),
+            ("trial_score_actual_10s", "existing_score_at_20s"),
+            ("trial_signal_status", "trial_signal_status_20s"),
+            ("trial_failed_conditions_10s", "trial_failed_conditions_20s"),
+            ("trial_gap_10s_pct", "gap_pct"),
+            ("trial_distance_10s_pct", "distance_outside_target_pct"),
+            ("trial_angle_10s_deg", "target_angle_deg_5m_equiv"),
+            ("manual_label", "manual_label"),
+            ("early_data_status", "early_data_status"),
+            ("trial_candidate", "trial_candidate_20s"),
+            ("model_training_example", "model_training_example"),
+        )
+        for destination, source in mapping:
+            result[destination] = (result.ticker.map(trial[source])
+                                   if source in trial.columns else pd.NA)
+        result["score"] = pd.to_numeric(result.score, errors="coerce")
+        result["trial_score_difference_10s"] = (
+            result.score - pd.to_numeric(result.trial_score_actual_10s,
+                                         errors="coerce")).round(1)
+        result["candidate"] = (result.trial_candidate.eq(True) &
+                               pd.to_numeric(result.trial_gap_10s_pct,
+                                             errors="coerce").abs().ge(min_gap_pct))
+        if max_signals is not None:
+            ranked = result.loc[result.candidate].sort_values(
+                ["score", "ticker"], ascending=[False, True]).head(max_signals)
+            result["candidate"] = result.index.isin(ranked.index)
+        for destination, source in (("opening_price", "price"),
+                                    ("gap_pct", "gap_pct"),
+                                    ("cutoff_bb_upper", "upper_provisional"),
+                                    ("cutoff_bb_lower", "lower_provisional")):
+            if source in trial.columns:
+                observed = result.ticker.map(trial[source])
+                result[destination] = observed.combine_first(result[destination])
+        result.loc[result.early_data_status.eq("Disponible"), "cutoff_seconds"] = 20
+        return result.sort_values(["score", "ticker"], ascending=[False, True],
+                                  na_position="last").reset_index(drop=True)
+    for destination, source in (
+            ("score", "experimental_score_10s"),
+            ("trial_model_score_raw_10s", "model_score_without_filters_10s"),
+            ("trial_score_actual_10s", "existing_score_at_cutoff"),
+            ("trial_score_difference_10s", "score_difference_10s"),
+            ("trial_signal_status", "trial_signal_status"),
+            ("trial_failed_conditions_10s", "trial_failed_conditions_10s"),
+            ("trial_gap_10s_pct", "gap_pct"),
+            ("trial_distance_10s_pct", "distance_outside_target_pct"),
+            ("trial_angle_10s_deg", "target_angle_deg_5m_equiv"),
+            ("manual_label", "manual_label"),
+            ("early_data_status", "early_data_status"),
+            ("trial_candidate", "trial_candidate")):
+        result[destination] = (result.ticker.map(trial[source])
+                               if source in trial.columns else pd.NA)
+    result.loc[result.trial_distance_10s_pct.le(0), "trial_score_actual_10s"] = pd.NA
+    result["candidate"] = (result.score.ge(70) if score_list else
+                           result.trial_candidate.eq(True))
+    return result.sort_values(["score", "trial_model_score_raw_10s", "ticker"],
+                              ascending=[False, False, True],
+                              na_position="last").reset_index(drop=True)
+
+
+def trial_history_panel() -> None:
+    st.subheader("Historial prueba")
+    st.caption("Diagnóstico de apertura, señales para revisar y gráficas ordenadas "
+               "por el modelo experimental del corte de 20 segundos.")
+    st.info("La banda es BB(20,2) de velas de 15 minutos, calculada "
+            "provisionalmente con operaciones disponibles hasta 09:30:20 ET. "
+            "El modelo de esta vista se ajustó retrospectivamente con todos los "
+            "juicios guardados: los scores de fechas ya etiquetadas pueden ser "
+            "de entrenamiento. La evaluación por fechas está más abajo.")
+    snapshot_dir = DATA_DIR / "snapshots"
+    files = sorted(snapshot_dir.glob("manual_label_history_trial_*.csv"))
+    model_files = sorted(snapshot_dir.glob("cutoff_model_history_20s_*.csv"))
+    if st.button("Recalcular Historial prueba con mis etiquetas"):
+        with st.spinner("Recalculando las puntuaciones de 20 s y la comparación histórica..."):
+            try:
+                from evaluate_manual_labels import main as evaluate_manual_labels
+                from study_cutoff_models import main as study_cutoffs
+                evaluate_manual_labels()
+                study_cutoffs()
+                st.success("Comparación actualizada.")
+            except ValueError as exc:
+                st.error(f"Todavía no se puede entrenar el modelo: {exc}")
+        files = sorted(snapshot_dir.glob("manual_label_history_trial_*.csv"))
+        model_files = sorted(snapshot_dir.glob("cutoff_model_history_20s_*.csv"))
+    if not files or not model_files:
+        st.info("Pulsa «Recalcular Historial prueba con mis etiquetas» para "
+                "crear la vista de 20 segundos.")
+        return
+    history = pd.read_csv(files[-1])
+    model_history = pd.read_csv(model_files[-1])
+    model_metadata_path = model_files[-1].with_suffix(".json")
+    if model_metadata_path.exists():
+        import json
+        model_metadata = json.loads(model_metadata_path.read_text(encoding="utf-8"))
+        st.caption(f"El índice 70 corresponde al umbral bruto "
+                   f"{model_metadata['threshold_raw']:.3f} del clasificador. "
+                   f"El modelo se ajustó con {model_metadata['training_cases']} "
+                   "juicios y el umbral se eligió con fechas anteriores dentro "
+                   "del estudio. El índice no es una "
+                   "probabilidad de éxito.")
+    labeled_comparison = history.loc[
+        history.manual_label.isin(("Excelente", "Buena", "Mala")) &
+        history.early_data_status.eq("Disponible")]
+    with st.expander("Comparación anterior con el experimento de 10 segundos"):
+        if labeled_comparison.empty:
+            st.write("Todavía no hay juicios con un corte real de 10 segundos.")
+        else:
+            positive = labeled_comparison.manual_label.isin(("Excelente", "Buena"))
+            comparison = []
+            for description, column, timing in (
+                    ("Original a 10 s", "existing_score_at_cutoff", "09:30:10"),
+                    ("Prueba a 10 s", "experimental_score_10s", "09:30:10"),
+                    ("Original posterior", "existing_final_score", "Tras la primera vela de 15 min")):
+                selected = labeled_comparison[column].ge(70)
+                comparison.append({
+                    "Score": description, "Momento": timing,
+                    "Buenas/Excelentes ≥70": int((positive & selected).sum()),
+                    "Malas ≥70": int((~positive & selected).sum()),
+                    "Total ≥70 con juicio": int(selected.sum()),
+                })
+            st.dataframe(pd.DataFrame(comparison), hide_index=True, width="stretch")
+            unlabeled_high = int((history.manual_label.eq("Pendiente") &
+                                  history.experimental_score_10s.ge(70)).sum())
+            st.caption(f"Hay {unlabeled_high} scores de prueba ≥70 sin juicio visual. "
+                       "Los casos ya juzgados se usaron para reajustar la prueba, así "
+                       "que esta tabla es descriptiva, no una validación independiente. "
+                       "El score original posterior incorpora datos que todavía no "
+                       "existían a los 10 segundos.")
+    dates = sorted(model_history.session_date.unique(), reverse=True)
+    selected_day = st.selectbox("Fecha de sesión", dates, key="trial_date")
+    chart_context(f"trial:{selected_day}")
+    day_rows = model_history.loc[model_history.session_date.eq(selected_day)]
+    setups, candles, _ = load_daily_session(selected_day)
+    min_gap = st.slider("Gap mínimo de la lista (%)", 0.0, 5.0,
+                        float(DEFAULT_THRESHOLDS.minimum_gap_pct or 0.0),
+                        step=0.25, key="trial20_min_gap")
+    total_signals = int(day_rows.trial_candidate_20s.fillna(False).sum())
+    signal_count = int((day_rows.trial_candidate_20s.fillna(False) &
+                        day_rows.gap_abs_pct.abs().ge(min_gap)).sum())
+    if signal_count:
+        max_signals = st.slider("Señales visibles en la lista", 1, signal_count,
+                                min(8, signal_count), key=f"trial20_limit_{selected_day}")
+    else:
+        max_signals = 0
+    trial_setups = trial_session_setups(
+        setups, day_rows, score_list=True, model_20s=True,
+        max_signals=max_signals, min_gap_pct=min_gap)
+    available = int(day_rows.early_data_status.eq("Disponible").sum())
+    st.caption(f"{selected_day} · {len(trial_setups)} símbolos analizados · "
+               f"{available} con operación real antes de 20 s. "
+               "La lista exige precio fuera de Bollinger al corte, dirección "
+               "coherente con la apertura e índice experimental ≥70. "
+               f"Hay {total_signals} señales según el modelo, {signal_count} "
+               f"con gap de al menos {min_gap:.2f}%; se muestran "
+               f"las {max_signals} mejor puntuadas en la lista. "
+               "Las velas posteriores sirven para revisar visualmente el caso.")
+    if total_signals > 15:
+        st.warning("El modelo marcó muchas aperturas de esta sesión. La lista "
+                   "ordenada sirve para revisar y etiquetar; este recuento todavía "
+                   "no demuestra que funcione sobre todo el universo.")
+    session_view(trial_setups, candles, f"trial_{selected_day}", trial=True,
+                 trial_score_list=True, trial_seconds=20)
+    st.divider()
+    stamp = files[-1].stem.removeprefix("manual_label_history_trial_")
+    summary_file = snapshot_dir / f"manual_label_daily_summary_{stamp}.csv"
+    report_file = snapshot_dir / f"manual_label_validation_{stamp}.json"
+    with st.expander("Evaluación de las 50 sesiones y comparación de scores"):
+        if not summary_file.exists():
+            st.info("Recalcula la comparación para obtener el resumen de 50 sesiones.")
+            return
+        summary = pd.read_csv(summary_file)
+        scored = history.loc[history.early_data_status.eq("Disponible")]
+        up = int(scored.score_difference_10s.gt(0).sum())
+        high = int(scored.experimental_score_10s.ge(70).sum())
+        raw_high = int(scored.model_score_without_filters_10s.ge(70).sum())
+        st.write(f"En {len(summary)} sesiones se observaron {len(scored)} cortes de 10 s. "
+                 f"El modelo antes de reglas superó 70 en {raw_high}; entre las "
+                 f"aperturas con gap suficiente y precio fuera de banda, {high} "
+                 f"tuvieron score de prueba ≥70. De ellas, "
+                 f"{int(scored.trial_candidate.sum())} cumplieron también todos los "
+                 "filtros y quedaron como candidatos. "
+                 f"El score de prueba fue mayor que el score anterior en {up} casos. "
+                 "Las empresas sin juicio visual no se cuentan como aciertos.")
+        st.caption("Las etiquetas proceden de casos escogidos para revisión, así que el "
+                   "modelo puede asignar scores altos a empresas fuera de ese grupo. "
+                   "La prueba en fechas posteriores sólo evalúa los casos etiquetados.")
+        if {"manual_good_candidates", "manual_bad_candidates",
+                "unreviewed_candidates"}.issubset(summary.columns):
+            st.caption(f"De los candidatos de prueba en estas sesiones: "
+                       f"{int(summary.manual_good_candidates.sum())} están marcados "
+                       f"Excelente/Buena, {int(summary.manual_bad_candidates.sum())} "
+                       f"Mala y {int(summary.unreviewed_candidates.sum())} siguen "
+                       "Pendiente. Los juicios usados para entrenar no son validación "
+                       "independiente.")
+        if report_file.exists():
+            import json
+            result = json.loads(report_file.read_text(encoding="utf-8"))
+            validation = result.get("windows", {}).get("10", {})
+            outcome = validation.get("model_ge_70", {})
+            st.caption(f"Comparación anterior (otro modelo) en fechas posteriores: "
+                       f"{outcome.get('tp_buenas', 0)} buenas detectadas, "
+                       f"{outcome.get('fn_buenas', 0)} omitidas, "
+                       f"{outcome.get('tn_malas', 0)} malas rechazadas y "
+                       f"{outcome.get('fp_malas', 0)} aceptadas. "
+                       "El nuevo score IA se evalúa en el panel siguiente.")
+            gated = validation.get("trial_candidate_with_existing_filters", {})
+            if gated:
+                st.caption(f"Al aplicar también los filtros actuales de candidato "
+                           f"a esas fechas: {gated.get('tp_buenas', 0)} buenas y "
+                           f"{gated.get('fp_malas', 0)} malas habrían entrado en la "
+                           "lista. Sólo se conoce el resultado de casos etiquetados.")
+        st.dataframe(summary, hide_index=True, width="stretch")
+        st.download_button("Descargar resumen (CSV)", summary.to_csv(index=False),
+                           file_name="historial_prueba_resumen.csv", mime="text/csv")
+    with st.expander("Estudio anterior: 10 a 60 segundos", expanded=False):
+        st.caption("Este estudio anterior puede tener archivos desactualizados. "
+                   "Aprende de tus etiquetas Excelente, Buena y Mala. Usa gap, distancia, "
+                   "Bandas de Bollinger y su reacción al corte; no aplica el límite de "
+                   "25° ni incorpora el score heurístico como variable.")
+        if st.button("Actualizar estudio de inteligencia artificial"):
+            with st.spinner("Entrenando con fechas anteriores y evaluando fechas posteriores..."):
+                from study_early_ai import main as run_early_ai_study
+                run_early_ai_study()
+            st.success("Estudio actualizado.")
+        ai_reports = sorted(snapshot_dir.glob("early_ai_study_*.json"))
+        if ai_reports:
+            import json
+            ai = json.loads(ai_reports[-1].read_text(encoding="utf-8"))
+            coverage = []
+            for second, result in ai["windows"].items():
+                coverage.append({"Corte": f"{second} s", "Etiquetadas": result["cases"],
+                                 "Fechas": result["days"],
+                                 "Prueba posterior": result["test_cases"],
+                                 "¿Validable?": "Sí" if result["status"] ==
+                                 "validated_on_later_dates" else "Aún no"})
+            st.dataframe(pd.DataFrame(coverage), hide_index=True, width="stretch")
+            evaluated = ai["windows"].get("10", {})
+            if evaluated.get("status") == "validated_on_later_dates":
+                rows = []
+                for name, result in evaluated["models"].items():
+                    outcome = result["test"]
+                    rows.append({"Método": name,
+                                 "Buenas detectadas": outcome["good_detected"],
+                                 "Malas rechazadas": outcome["bad_rejected"],
+                                 "Excelentes detectadas": outcome["excellent_detected"],
+                                 "Exactitud equilibrada": outcome["balanced_accuracy"]})
+                st.caption("Prueba reservada por fecha: " +
+                           " a ".join(evaluated["test_dates"]) +
+                           ". El modelo se selecciona por resultados de entrenamiento.")
+                st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+                three = evaluated.get("three_label_exploratory", {})
+                if three:
+                    st.caption(f"Al intentar distinguir Excelente de Buena y Mala por "
+                               f"separado, acertó {three['test_correct_excellent']}/"
+                               f"{three['test_total_excellent']} Excelentes; "
+                               f"F1 promedio de las tres clases: {three['test_macro_f1']}. "
+                               "Esta parte aún es exploratoria.")
+                with st.expander("Qué aportan el gap, el ángulo y otras variables"):
+                    ablations = evaluated.get("ablations_exploratory", {})
+                    ablation_rows = [{"Variables": key.replace("_", " "),
+                                      "Buenas detectadas": value["test"]["good_detected"],
+                                      "Malas rechazadas": value["test"]["bad_rejected"],
+                                      "Exactitud equilibrada":
+                                      value["test"]["balanced_accuracy"]}
+                                     for key, value in ablations.items()]
+                    if ablation_rows:
+                        st.dataframe(pd.DataFrame(ablation_rows),
+                                     hide_index=True, width="stretch")
+                    st.caption("Estas comparaciones exploran si las variables aportan "
+                               "separación; una importancia de árbol no establece una "
+                               "regla universal ni demuestra causalidad.")
+                    grid = evaluated.get("observed_gap_angle_grid_training", [])
+                    if grid:
+                        st.write("Casos observados por tamaño de gap y ángulo")
+                        st.dataframe(pd.DataFrame(grid), hide_index=True,
+                                     width="stretch")
+                        st.caption("Cada casilla muestra cuántas etiquetas había en "
+                                   "ese rango. Las casillas pequeñas no permiten "
+                                   "deducir un límite general.")
+                    pairs = evaluated.get("similar_gap_opposite_labels_test", [])
+                    if pairs:
+                        st.write("Pares con gaps parecidos y etiquetas distintas")
+                        st.dataframe(pd.DataFrame([{
+                            "Buena/Excelente": f"{pair['good']['date']} {pair['good']['ticker']}",
+                            "Gap buena %": pair["good"]["gap_pct"],
+                            "Ángulo buena °": pair["good"]["angle_deg"],
+                            "Reacción banda buena %": pair["good"]["band_reaction_pct"],
+                            "Modelo buena": pair["good"]["model_score"],
+                            "Mala": f"{pair['bad']['date']} {pair['bad']['ticker']}",
+                            "Gap mala %": pair["bad"]["gap_pct"],
+                            "Ángulo mala °": pair["bad"]["angle_deg"],
+                            "Reacción banda mala %": pair["bad"]["band_reaction_pct"],
+                            "Modelo mala": pair["bad"]["model_score"],
+                        } for pair in pairs]), hide_index=True, width="stretch")
+            audit = ai.get("universe_audit", {})
+            audit_file = ai_reports[-1].with_name(
+                ai_reports[-1].name.replace("early_ai_study_", "early_ai_universe_")
+                .replace(".json", ".csv"))
+            if audit and audit_file.exists():
+                with st.expander("Auditoría del score IA sobre todo el universo"):
+                    st.warning(f"El modelo daría ≥70 a {audit['ai_score_ge70']}/"
+                               f"{audit['observed_cuts']} cortes de 10 s. De ellos, "
+                               f"{audit['unlabeled_ai_score_ge70']} no tienen juicio "
+                               "visual. Por esa cobertura no sustituye todavía el "
+                               "score principal de Historial prueba.")
+                    audit_rows = pd.read_csv(audit_file)
+                    day_audit = audit_rows.loc[
+                        audit_rows.session_date.eq(selected_day) &
+                        audit_rows.early_data_status.eq("Disponible")].sort_values(
+                            "experimental_score_10s", ascending=False)
+                    if not day_audit.empty:
+                        st.write(f"Puntuaciones IA del {selected_day} (1 a 100)")
+                        st.dataframe(day_audit.reindex(columns=[
+                            "ticker", "experimental_score_10s", "manual_label",
+                            "gap_pct", "distance_outside_prior_target_pct",
+                            "target_angle_deg_5m_equiv", "trial_signal_status"]),
+                            hide_index=True, width="stretch")
+                    st.download_button("Descargar auditoría IA completa (CSV)",
+                                       audit_file.read_bytes(),
+                                       file_name=audit_file.name, mime="text/csv")
+            prediction_file = ai_reports[-1].with_name(
+                ai_reports[-1].name.replace("early_ai_study_", "early_ai_predictions_")
+                .replace(".json", ".csv"))
+            if prediction_file.exists():
+                heldout = pd.read_csv(prediction_file)
+                selected_cases = heldout.loc[heldout.session_date.eq(selected_day)]
+                if not selected_cases.empty:
+                    st.write(f"Predicciones independientes del {selected_day}")
+                    shown = selected_cases.reindex(columns=[
+                        "ticker", "label", "gap_pct",
+                        "distance_outside_target_pct", "target_angle_deg_5m_equiv",
+                        "ExtraTrees_score_raw_0_100", "ExtraTrees_selected",
+                        "RandomForest_score_raw_0_100", "RandomForest_selected"])
+                    st.dataframe(shown, hide_index=True, width="stretch")
+                    st.caption("Estos porcentajes son índices del modelo, no "
+                               "probabilidades calibradas. Sólo se muestran fechas "
+                               "reservadas que el modelo no vio al entrenar.")
+                st.download_button("Descargar predicciones reservadas (CSV)",
+                                   prediction_file.read_bytes(),
+                                   file_name=prediction_file.name, mime="text/csv")
+            st.caption("Las operaciones históricas SIP indican hora de mercado, no "
+                       "garantizan que los datos hubieran llegado al programa en ese "
+                       "segundo. Se necesitan más cortes históricos y etiquetas "
+                       "representativas antes de usar esto en la operativa.")
+        else:
+            st.caption("Pulsa «Actualizar estudio» para comparar los cortes disponibles.")
+    with st.expander("Comparación anterior de scores y filtros actuales"):
+        if st.button("Repetir comparación con mis juicios"):
+            with st.spinner("Comparando modelos por fechas..."):
+                from study_10s_scoring import main as run_score_study
+                run_score_study()
+            st.success("Estudio actualizado.")
+        studies = sorted(snapshot_dir.glob("ten_second_scoring_study_*.json"))
+        if studies:
+            import json
+            study = json.loads(studies[-1].read_text(encoding="utf-8"))
+            st.caption(f"{study['labels_with_10s']} juicios con corte real; "
+                       f"{study['labels_with_signal_at_10s']} tenían gap suficiente y "
+                       "precio fuera de Bollinger a los 10 s. Fechas posteriores de "
+                       f"prueba: {study['test_dates'][0]} a {study['test_dates'][1]}.")
+            rows = []
+            baseline = study["baseline_score_heuristico_10s_ge70"]
+            rows.append({"Método": "Heurístico anterior", "Buenas detectadas":
+                         baseline["tp_buenas"], "Malas rechazadas": baseline["tn_malas"],
+                         "Malas aceptadas": baseline["fp_malas"],
+                         "Exactitud equilibrada": baseline["exactitud_equilibrada"]})
+            for name, comparison in study["models"].items():
+                if "later_dates" not in comparison:
+                    continue
+                metrics = comparison["later_dates"]
+                rows.append({"Método": name, "Buenas detectadas": metrics["tp_buenas"],
+                             "Malas rechazadas": metrics["tn_malas"],
+                             "Malas aceptadas": metrics["fp_malas"],
+                             "Exactitud equilibrada": metrics["exactitud_equilibrada"],
+                             "Excelentes detectadas": comparison["excellent_detected_later"]})
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+            tree_result = study["models"].get("Árboles aleatorios simples", {})
+            if "feature_effects_exploratory" in tree_result:
+                feature_names = {
+                    "gap_abs_pct": "Tamaño del gap",
+                    "distance_outside_target_pct": "Distancia fuera de banda",
+                    "prior_width_pct": "Ancho previo de Bollinger",
+                    "prior_width_change_pp_per_bar": "Cambio previo del ancho",
+                    "target_angle_deg_5m_equiv": "Ángulo provisional a 10 s",
+                    "existing_score_at_cutoff": "Score heurístico a 10 s",
+                }
+                effects = pd.DataFrame([
+                    {"Variable": feature_names.get(name, name),
+                     "Importancia exploratoria": value}
+                    for name, value in tree_result["feature_effects_exploratory"].items()
+                ]).sort_values("Importancia exploratoria", ascending=False)
+                st.dataframe(effects, hide_index=True, width="stretch")
+                st.caption("La importancia indica cuánto usaron los árboles cada "
+                           "variable; no indica si subirla mejora el caso ni es un "
+                           "peso aprobado para el scanner.")
+            angle_counts = study.get("angle_above_limit_among_signals_by_label", {})
+            if angle_counts:
+                good_over = sum(angle_counts.get(label, {}).get("above", 0)
+                                for label in ("Excelente", "Buena"))
+                good_total = sum(angle_counts.get(label, {}).get("total", 0)
+                                 for label in ("Excelente", "Buena"))
+                bad_over = angle_counts.get("Mala", {}).get("above", 0)
+                bad_total = angle_counts.get("Mala", {}).get("total", 0)
+                st.caption(f"Ángulo provisional superior al límite de 25°: "
+                           f"{good_over}/{good_total} juicios Excelente/Buena y "
+                           f"{bad_over}/{bad_total} Mala. A los 10 s este ángulo "
+                           "puede ser muy inestable; el filtro estricto se informa "
+                           "por separado.")
+            st.caption("Estos resultados corresponden sólo a los casos con juicio humano. "
+                       "Los juicios no son una muestra aleatoria del universo y el estudio "
+                       "no cambia el score ni la operativa. El bosque de esta tabla se "
+                       "entrenó sólo con señales, por lo que difiere del modelo que "
+                       "genera el Historial prueba.")
+        else:
+            st.caption("Pulsa «Repetir comparación con mis juicios» para crear el estudio.")
+    with st.expander("Modelo experimental por corte: 10, 20 y 30 segundos"):
+        st.caption("Se entrena con fechas anteriores, sin datos posteriores al corte. "
+                   "Sólo se evalúan casos etiquetados que seguían fuera de Bollinger. "
+                   "El índice del modelo no es una probabilidad calibrada.")
+        if st.button("Actualizar comparación temporal por cortes"):
+            with st.spinner("Evaluando modelos y fechas posteriores..."):
+                from study_cutoff_models import main as run_cutoff_study
+                run_cutoff_study()
+            st.success("Comparación actualizada.")
+        cutoff_reports = sorted(snapshot_dir.glob("cutoff_model_study_eligible_*.json"))
+        if cutoff_reports:
+            import json
+            study = json.loads(cutoff_reports[-1].read_text(encoding="utf-8"))
+            rows = []
+            for second in (10, 20, 30):
+                result = study[str(second)]
+                chosen = result["selected_by_inner_dates"]
+                metrics = chosen["test_counts"]
+                original = result["score_actual_ge70"]
+                rows.append({"Corte": f"{second} s", "Casos posteriores":
+                             result["test_cases"], "Buenas IA": metrics["good_detected"],
+                             "Malas rechazadas IA": metrics["bad_rejected"],
+                             "Malas aceptadas IA": metrics["bad_accepted"],
+                             "Buenas score actual": original["good_detected"],
+                             "Malas rechazadas actual": original["bad_rejected"]})
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+            rolling = study["rolling_20s"]
+            model_counts = rolling["model_total"]
+            original_counts = rolling["original_ge70_total"]
+            st.caption(f"Al avanzar fecha por fecha a 20 s ({rolling['cases']} casos con "
+                       f"juicio): IA detectó {model_counts['good_detected']} buenas y "
+                       f"rechazó {model_counts['bad_rejected']} malas; score actual "
+                       f"detectó {original_counts['good_detected']} buenas y rechazó "
+                       f"{original_counts['bad_rejected']} malas.")
+            interval = rolling.get("date_bootstrap_gain_ci95")
+            if interval:
+                st.caption(f"Mejora de exactitud equilibrada: "
+                           f"{rolling['paired_gain_balanced_accuracy']:+.3f}; "
+                           f"intervalo exploratorio por fechas: "
+                           f"{interval[0]:+.3f} a {interval[1]:+.3f}.")
+            selected_file = cutoff_reports[-1].with_name(
+                cutoff_reports[-1].name.replace("cutoff_model_study_eligible_",
+                                                "cutoff_model_predictions_20s_")
+                .replace(".json", ".csv"))
+            if selected_file.exists():
+                predicted = pd.read_csv(selected_file)
+                day = predicted.loc[predicted.session_date.eq(selected_day)]
+                if not day.empty:
+                    st.write(f"Juicios disponibles del {selected_day} a 20 s")
+                    st.dataframe(day.rename(columns={
+                        "ticker": "Símbolo", "label": "Juicio visual",
+                        "target_band": "Dirección",
+                        "gap_abs_pct": "Gap %",
+                        "distance_outside_target_pct": "Distancia exterior %",
+                        "target_angle_deg_5m_equiv": "Ángulo 20 s °",
+                        "provisional_width_ratio": "Ancho BB / previo",
+                        "existing_score_at_cutoff": "Score actual 20 s",
+                        "model_score": "Índice IA 20 s",
+                        "selected": "Seleccionada IA"}).reindex(columns=[
+                            "Símbolo", "Juicio visual", "Dirección", "Gap %",
+                            "Distancia exterior %", "Ángulo 20 s °",
+                            "Ancho BB / previo", "Score actual 20 s", "Índice IA 20 s",
+                            "Seleccionada IA"]),
+                            hide_index=True, width="stretch")
+            st.caption("Los juicios se eligieron manualmente y estas fechas ya se "
+                       "examinaron durante el ajuste; falta una prueba futura "
+                       "independiente antes de cambiar el score operativo.")
+
+
 @st.cache_data(ttl=60)
 def review_history() -> tuple[pd.DataFrame, pd.DataFrame]:
     return export_history(HISTORY_SESSION_LIMIT)
@@ -566,6 +1135,63 @@ def review_export(reviews: pd.DataFrame, setups: pd.DataFrame,
     return pd.DataFrame.from_records(records)
 
 
+def trial_review_cases(setups: pd.DataFrame, trial_history: pd.DataFrame,
+                       model_20s: bool = False) -> pd.DataFrame:
+    """Une los casos de Historial prueba con las velas usadas en la revisión."""
+    score_column = "model_score_20s" if model_20s else "experimental_score_10s"
+    actual_column = "existing_score_at_20s" if model_20s else "existing_score_at_cutoff"
+    candidate_column = "trial_candidate_20s" if model_20s else "trial_candidate"
+    status_column = "trial_signal_status_20s" if model_20s else "trial_signal_status"
+    columns = ["session_date", "ticker", score_column,
+               actual_column, candidate_column, "early_data_status",
+               "gap_pct", "target_band", "distance_outside_target_pct",
+               "distance_outside_prior_target_pct", "target_angle_deg_5m_equiv",
+               status_column]
+    trial = trial_history.reindex(columns=columns).rename(columns={
+        score_column: "review_score_trial",
+        actual_column: "review_score_actual_10s",
+        candidate_column: "review_trial_candidate",
+        "gap_pct": "review_gap_10s_pct",
+        "target_band": "review_target_band",
+        "distance_outside_target_pct": "review_distance_10s_pct",
+        "distance_outside_prior_target_pct": "review_prior_distance_10s_pct",
+        "target_angle_deg_5m_equiv": "review_angle_10s_deg",
+        status_column: "review_signal_status",
+    })
+    result = setups.merge(trial, on=["session_date", "ticker"], how="inner",
+                          validate="one_to_one")
+    result["review_trial_candidate"] = result.review_trial_candidate.eq(True)
+    result["review_score_high"] = result.review_score_trial.ge(70)
+    return result
+
+
+def balanced_ai_review_sample(setups: pd.DataFrame,
+                              labeled: dict[tuple[str, str], str]) -> pd.DataFrame:
+    """Hasta doce aperturas exteriores pendientes por día, de todo el rango IA."""
+    eligible = setups.loc[
+        setups.early_data_status.eq("Disponible") &
+        pd.to_numeric(setups.review_prior_distance_10s_pct, errors="coerce").gt(0) &
+        setups.gap_direction.map({"UP": "UPPER", "DOWN": "LOWER"}).eq(
+            setups.review_target_band) &
+        pd.to_numeric(setups.review_score_trial, errors="coerce").notna()].copy()
+    eligible = eligible.loc[[
+        (row.session_date, row.ticker) not in labeled for row in eligible.itertuples()]]
+    if eligible.empty:
+        return eligible
+    eligible["score_rank"] = eligible.groupby("session_date").review_score_trial.rank(
+        pct=True, method="first")
+    eligible["score_group"] = pd.cut(eligible.score_rank, [0, 1/3, 2/3, 1],
+                                     labels=("bajo", "medio", "alto"),
+                                     include_lowest=True)
+    sample = pd.concat([
+        rows.sample(n=min(4, len(rows)), random_state=42)
+        for _, rows in eligible.groupby(["session_date", "score_group"],
+                                        observed=True)
+    ])
+    return sample.drop(columns=["score_rank", "score_group"]).sort_values(
+        ["session_date", "review_score_trial"], ascending=[False, False])
+
+
 def change_review_page(delta: int, pages: int) -> None:
     st.session_state.manual_review_page = max(
         1, min(pages, st.session_state.manual_review_page + delta))
@@ -594,12 +1220,44 @@ def manual_review_panel() -> None:
         st.success(saved_notice)
     st.caption("La gráfica de apertura muestra la última hora previa y las primeras "
                "dos horas de la sesión. Los cortes tempranos sólo muestran datos "
-               "disponibles hasta ese segundo. Las etiquetas no modifican el scanner ni su score.")
+               "disponibles hasta ese segundo. Los juicios no modifican el scanner operativo.")
     setups, candles = review_history()
     if setups.empty:
         st.info("No hay sesiones históricas locales. Descárgalas desde Historial.")
         return
+    source = st.radio("Revisar casos de", ("Historial prueba", "Auditoría IA",
+                                          "Historial actual"),
+                      horizontal=True)
+    trial_mode = source != "Historial actual"
+    ai_mode = source == "Auditoría IA"
+    review_cutoff_seconds = 10 if ai_mode else 20
+    recalc_notice = st.session_state.pop("review_recalc_notice", None)
+    if recalc_notice:
+        st.success(recalc_notice)
+    if trial_mode:
+        pattern = ("early_ai_universe_*.csv" if ai_mode else
+                   "cutoff_model_history_20s_*.csv")
+        files = sorted((DATA_DIR / "snapshots").glob(pattern))
+        if not files:
+            st.info("Primero genera el estudio en Historial prueba.")
+            return
+        trial_history = pd.read_csv(files[-1])
+        setups = trial_review_cases(setups, trial_history, model_20s=not ai_mode)
+        st.caption(("Se muestran los scores IA de todo el universo. La muestra "
+                    "equilibrada invita a etiquetar casos altos, medios y bajos "
+                    "que estaban fuera de la banda previa. " if ai_mode else
+                    "Se muestran las puntuaciones del modelo de 20 segundos de "
+                    "Historial prueba. Etiqueta también casos con índice alto que "
+                    "visualmente hayan fallado. ") +
+                   f"El score procede del corte real de {review_cutoff_seconds} s; la gráfica completa "
+                   "sirve para juzgar el resultado. Marca también «Mala» cuando una "
+                   "selección de prueba no cumplió lo que buscabas. "
+                   f"Última sesión disponible en esta prueba: "
+                   f"{trial_history.session_date.max()}.")
     dates = sorted(setups.session_date.unique(), reverse=True)[:HISTORY_SESSION_LIMIT]
+    if not dates:
+        st.info("No hay sesiones de Historial prueba que coincidan con las velas locales.")
+        return
     setups = setups.loc[setups.session_date.isin(dates)].copy()
     reviews = load_reviews()
     reviews = reviews.loc[reviews.session_date.isin(dates)]
@@ -607,36 +1265,98 @@ def manual_review_panel() -> None:
     coverage = {day: set(review_observations(day).window_seconds.unique()) for day in dates}
     metrics = st.columns(4)
     metrics[0].metric("Sesiones", len(dates))
-    metrics[1].metric("Aperturas fuera de banda", int((setups.distance_to_band_pct > 0).sum()))
+    metrics[1].metric(("IA ≥70 (sin validar)" if ai_mode else "Señales con score ≥70")
+                      if trial_mode else "Aperturas fuera de banda",
+                      int(setups.review_score_high.sum()) if trial_mode else
+                      int((setups.distance_to_band_pct > 0).sum()))
     metrics[2].metric("Etiquetadas", len(reviews))
     metrics[3].metric("Historial con 20/30/60 s",
                       sum(bool({20, 30, 60} & coverage[d]) for d in dates))
-    with st.expander("Datos para un futuro modelo y pesos actuales"):
-        st.write("A los 10 segundos disponemos de operación inicial y última operación "
+    if trial_mode:
+        if st.button("Recalcular auditoría IA" if ai_mode else
+                     "Recalcular Historial prueba con mis juicios guardados"):
+            with st.spinner("Actualizando la auditoría..." if ai_mode else
+                            "Actualizando el score de prueba y su evaluación..."):
+                try:
+                    if ai_mode:
+                        from study_early_ai import main as recalculate
+                        recalculate(audit_only=True)
+                    else:
+                        from study_cutoff_models import main as recalculate
+                        recalculate()
+                    st.session_state.review_recalc_notice = (
+                        "Auditoría actualizada con tus juicios. Para actualizar también "
+                        "la evaluación por fechas, ejecuta el estudio completo de IA."
+                        if ai_mode else
+                        "Resultados actualizados. La evaluación reservada por fechas "
+                        "permanece separada de la vista exploratoria.")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(f"No se pudo recalcular: {exc}")
+        st.caption("Los juicios se guardan al seleccionar una opción. Recalcula cuando "
+                   "termines. La evaluación reserva fechas posteriores, pero la vista "
+                   "exploratoria se entrena después con todos los juicios disponibles.")
+    with st.expander("Variables tempranas y score heurístico anterior"):
+        st.write(f"A los {review_cutoff_seconds} segundos disponemos de operación inicial y última operación "
                  "del corte histórico, gap frente al cierre previo, BB(20,2) de 15 min "
                  "provisional, distancia exterior, ancho y pendiente previos. "
                  "El ángulo dentro del corte compara la primera y última operación "
                  "con tiempos distintos y se normaliza a cinco minutos.")
-        st.write("Los archivos históricos actuales no guardan la trayectoria completa "
-                 "de 10 segundos ni cortes de 20/30 segundos. No se usan velas posteriores "
+        st.write("Los archivos históricos guardan cortes de 10, 20 y 30 segundos, "
+                 "pero no reconstruyen todos los puntos entre cortes. No se usan velas posteriores "
                  "para recrearlos. La sesión completa sirve para etiquetar, pero sus "
                  "métricas posteriores se excluyen de las variables tempranas.")
         from scanner_settings import SCORE_WEIGHTS
         st.dataframe(pd.DataFrame([{"factor": key, "peso_relativo": value}
                                    for key, value in SCORE_WEIGHTS.items()]),
                      hide_index=True, width="stretch")
-        st.caption("El score actual es una escala heurística, no una probabilidad de éxito. "
-                   "Después de reunir etiquetas Excelente, Buena y Mala se podrá entrenar un "
-                   "clasificador supervisado y validarlo separando las fechas en el tiempo.")
+        st.caption("El score heurístico no es una probabilidad de éxito. El clasificador "
+                   "experimental usa esos datos y juicios visuales; su evaluación por "
+                   "fecha se guarda aparte y aún no valida todas las empresas.")
     filters = st.columns([1.7, 1.2, 1.1, .8])
-    pool_name = filters[0].selectbox("Casos", ("Fuera de banda y gap ≥1%",
-                                               "Todas las aperturas fuera de banda",
-                                               "Candidatos del scanner", "Todos"))
-    date_choice = filters[1].selectbox("Sesión", ("Todas", *dates))
+    pool_options = (("Muestra equilibrada sin etiqueta", "Candidatos IA fuera de banda",
+                     "Todos con corte de 10 s") if ai_mode else
+                    ("Señales con score prueba ≥70", "Señales modelo válidas",
+                     "Descartados por la prueba",
+                     "Original 20 s ≥70 sin juicio", "Original 20 s <70 sin juicio",
+                     "Todos con corte de 20 s") if trial_mode else
+                    ("Fuera de banda y gap ≥1%", "Todas las aperturas fuera de banda",
+                     "Candidatos del scanner", "Todos"))
+    pool_name = filters[0].selectbox("Casos", pool_options)
+    candidate_days = (sorted(setups.loc[setups.review_score_high,
+                                         "session_date"].unique(), reverse=True)
+                      if trial_mode else [])
+    preferred_day = candidate_days[0] if candidate_days else dates[0]
+    date_choice = filters[1].selectbox("Sesión", (*dates, "Todas"),
+                                       index=dates.index(preferred_day))
     label_choice = filters[2].selectbox("Etiqueta", ("Todas", "Pendiente", *LABELS))
     page_size = filters[3].selectbox("Gráficas/página", (12, 24, 50))
-    only_high_score = st.checkbox("Sólo score final ≥ 70")
-    if pool_name == "Fuera de banda y gap ≥1%":
+    only_high_score = (st.checkbox("Sólo score final ≥ 70") if not trial_mode else False)
+    if pool_name == "Muestra equilibrada sin etiqueta":
+        pool = balanced_ai_review_sample(setups, labeled)
+    elif pool_name == "Original 20 s ≥70 sin juicio":
+        pool = setups.loc[setups.early_data_status.eq("Disponible") &
+                          setups.review_score_actual_10s.ge(70)].copy()
+        pool = pool.loc[[
+            (row.session_date, row.ticker) not in labeled for row in pool.itertuples()]]
+    elif pool_name == "Original 20 s <70 sin juicio":
+        pool = setups.loc[setups.early_data_status.eq("Disponible") &
+                          setups.review_distance_10s_pct.gt(0) &
+                          setups.review_score_actual_10s.lt(70)].copy()
+        pool = pool.loc[[
+            (row.session_date, row.ticker) not in labeled for row in pool.itertuples()]]
+    elif pool_name == "Candidatos IA fuera de banda":
+        pool = setups.loc[setups.review_trial_candidate].copy()
+    elif pool_name == "Señales con score prueba ≥70":
+        pool = setups.loc[setups.review_score_high].copy()
+    elif pool_name == "Señales modelo válidas":
+        pool = setups.loc[setups.review_trial_candidate].copy()
+    elif pool_name == "Descartados por la prueba":
+        pool = setups.loc[setups.early_data_status.eq("Disponible") &
+                          ~setups.review_trial_candidate].copy()
+    elif pool_name in ("Todos con corte de 10 s", "Todos con corte de 20 s"):
+        pool = setups.loc[setups.early_data_status.eq("Disponible")].copy()
+    elif pool_name == "Fuera de banda y gap ≥1%":
         pool = setups.loc[(setups.distance_to_band_pct > 0) &
                           (setups.gap_pct.abs() >= 1)].copy()
     elif pool_name == "Todas las aperturas fuera de banda":
@@ -653,11 +1373,15 @@ def manual_review_panel() -> None:
                             for row in pool.itertuples()]
     if label_choice != "Todas":
         pool = pool.loc[pool.manual_label == label_choice]
-    pool = pool.sort_values(["session_date", "distance_to_band_pct"],
-                            ascending=[False, False], na_position="last")
-    st.caption(f"{len(pool)} casos en este filtro. «Pendiente» no significa Mala."
-               + ("" if only_high_score else
-                  " Los casos con score bajo siguen visibles si abrieron fuera de banda."))
+    original_pool = pool_name.startswith(("Original 10 s", "Original 20 s"))
+    pool = pool.sort_values(["session_date", "review_score_actual_10s"
+                             if original_pool else "review_score_trial" if trial_mode else
+                             "distance_to_band_pct"], ascending=[False, False],
+                            na_position="last")
+    st.caption(f"{len(pool)} casos en este filtro · "
+               f"{int(pool.manual_label.eq('Mala').sum())} marcados Mala · "
+               f"{int(pool.manual_label.eq('Pendiente').sum())} pendientes. "
+               "«Pendiente» no significa Mala.")
     with st.expander("Descargar etiquetas y variables tempranas (opcional)"):
         st.caption("Tus juicios ya están guardados. Genera el CSV sólo si quieres una "
                    "copia para análisis; después de cambiar etiquetas, vuelve a generarlo.")
@@ -693,9 +1417,32 @@ def manual_review_panel() -> None:
         with st.container(border=True):
             header = st.columns([1.6, 1, 1, 1])
             header[0].markdown(f"**{day} · {ticker} · {row.gap_direction}**")
-            header[1].caption(f"Gap {row.gap_pct:+.2f}%")
-            header[2].caption(f"Distancia {row.distance_to_band_pct:+.2f}%")
-            header[3].caption(f"Score final {row.score:.1f}")
+            if trial_mode:
+                header[1].caption(f"Gap {review_cutoff_seconds} s "
+                                  f"{row.review_gap_10s_pct:+.2f}%")
+                header[2].caption(f"Distancia {review_cutoff_seconds} s "
+                                  f"{row.review_distance_10s_pct:+.2f}%")
+                trial_score = (f"{row.review_score_trial:.1f}"
+                               if pd.notna(row.review_score_trial) else "sin señal")
+                if original_pool:
+                    header[3].caption(f"Score original {review_cutoff_seconds} s "
+                                      f"{row.review_score_actual_10s:.1f}")
+                else:
+                    header[3].caption(f"{'Score IA' if ai_mode else 'Score prueba'} "
+                                      f"{review_cutoff_seconds} s {trial_score}")
+                angle = (f"{row.review_angle_10s_deg:+.1f}°"
+                         if pd.notna(row.review_angle_10s_deg) else "no medible")
+                heuristic = (f"{row.review_score_actual_10s:.1f}"
+                             if pd.notna(row.review_score_actual_10s) and
+                             row.review_distance_10s_pct > 0 else "sin señal")
+                st.caption(f"Ángulo {review_cutoff_seconds} s {angle} · "
+                           f"Score heurístico {review_cutoff_seconds} s "
+                           f"{heuristic} · Score posterior {row.score:.1f} · "
+                           f"{row.review_signal_status}")
+            else:
+                header[1].caption(f"Gap {row.gap_pct:+.2f}%")
+                header[2].caption(f"Distancia {row.distance_to_band_pct:+.2f}%")
+                header[3].caption(f"Score final {row.score:.1f}")
             if view == "Apertura (15 min)":
                 if sample_candles.empty:
                     st.info("No hay velas de 15 minutos para este caso.")
@@ -746,7 +1493,7 @@ def main() -> None:
     style()
     st.sidebar.markdown("## Efecto Imán")
     page = st.sidebar.radio("NAVEGACIÓN", ("Operativa diaria", "Historial",
-                                            "Revisión manual"),
+                                            "Historial prueba", "Revisión manual"),
                             label_visibility="collapsed")
     st.sidebar.caption("Gaps alcistas y bajistas · reversión hacia Bollinger")
     st.sidebar.caption("Análisis local · Sin ejecución de órdenes")
@@ -757,6 +1504,8 @@ def main() -> None:
         daily_panel()
     elif page == "Historial":
         historical_panel()
+    elif page == "Historial prueba":
+        trial_history_panel()
     else:
         manual_review_panel()
 

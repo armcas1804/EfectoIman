@@ -49,6 +49,23 @@ class ManualReviewTests(unittest.TestCase):
             self.assertEqual(early_path.loc[
                 early_path.second_after_open <= 10, "price"].tolist(), [100, 101])
 
+    def test_sixty_second_history_keeps_each_cut_independent(self):
+        with TemporaryDirectory() as folder:
+            snapshot_dir = Path(folder)
+            ny = ZoneInfo("America/New_York")
+            opened = datetime(2026, 10, 9, 9, 30, tzinfo=ny)
+            trades = [{"t": opened.replace(second=second).isoformat(), "p": 100 + second}
+                      for second in (5, 15, 25, 35, 45, 55)]
+            trades.append({"t": opened.replace(minute=31, second=5).isoformat(), "p": 999})
+            result = summarize_windows("2026-10-09", {"AAL": trades}, max_seconds=60)
+            self.assertEqual(result.window_seconds.tolist(), [10, 20, 30, 40, 50, 60])
+            self.assertEqual(result.price_at_cutoff.tolist(), [105, 115, 125, 135, 145, 155])
+            result.to_csv(snapshot_dir / "apertura_historica_60s_2026-10-09.csv",
+                          index=False)
+            observed = early_observations("2026-10-09", snapshot_dir)
+            self.assertEqual(observed.window_seconds.tolist(), [10, 20, 30, 40, 50, 60])
+            self.assertEqual(observed.price.tolist(), [105, 115, 125, 135, 145, 155])
+
     def test_bands_at_ten_seconds_ignore_later_prices(self):
         with TemporaryDirectory() as folder:
             snapshot_dir = Path(folder)

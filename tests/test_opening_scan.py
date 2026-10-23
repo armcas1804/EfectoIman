@@ -361,6 +361,19 @@ class OpeningScanTests(unittest.TestCase):
                                 (70, 0), (80, 0)):
             self.assertAlmostEqual(_target_angle_quality(angle), expected)
 
+    def test_open_score_only_penalizes_large_provisional_band_expansion(self) -> None:
+        metrics = {"gap_pct": 2.0, "distance_to_band_pct": 1.0,
+                   "prior_bb_width_pct": 1.0, "prior_bb_width_change": 0.0,
+                   "target_angle_cutoff_deg": 0.0}
+        original = _score(metrics, "open")
+        small = {**metrics, "cutoff_bb_upper": 101.0, "cutoff_bb_lower": 99.0}
+        large = {**metrics, "cutoff_bb_upper": 102.0, "cutoff_bb_lower": 98.0}
+        breakdown = {}
+        self.assertEqual(_score(small, "open"), original)
+        self.assertAlmostEqual(_score(large, "open", breakdown), original - 20.0)
+        self.assertEqual(breakdown["score_cutoff_expansion_component"], -20.0)
+        self.assertEqual(_score(metrics, "open"), original)
+
     def test_flat_separated_band_outranks_expanding_band_despite_first_minute(self) -> None:
         flat = dict(gap_pct=1.75, distance_to_band_pct=1.31, prior_bb_width_pct=1.32,
                     prior_bb_width_change=-2.8, target_angle_1m_deg=74,

@@ -16,6 +16,7 @@ SCORE_FIELDS = (
     "score_compression_component", "score_prior_width_growth_component",
     "score_target_angle_component", "score_first_minute_component",
     "score_post_open_expansion_component",
+    "score_cutoff_expansion_component",
 )
 
 

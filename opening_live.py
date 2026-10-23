@@ -1,4 +1,4 @@
-"""Captura local de la apertura y diagnósticos a 10, 30 y 60 segundos."""
+"""Captura local de la apertura y diagnósticos a 10, 30, 60 y 90 segundos."""
 
 import csv
 import math
@@ -22,8 +22,8 @@ NEW_YORK = ZoneInfo("America/New_York")
 OPEN_TIME = time(9, 30)
 PREPARE_MINUTES = 5
 CAPTURE_SECONDS = 10
-OBSERVE_SECONDS = 60
-DISPLAY_WINDOWS = (30, 60)
+DISPLAY_WINDOWS = (30, 60, 90)
+OBSERVE_SECONDS = max(DISPLAY_WINDOWS)
 MAX_PROVIDER_CLOCK_SKEW_SECONDS = 3
 
 
@@ -140,6 +140,7 @@ class OpeningCapture:
                 self.status = "Sin apertura programada en fin de semana"
                 return
             if now >= self.observe_until:
+                self._started = False
                 self.status = "Los cortes de apertura no se capturaron en este proceso"
                 return
         threading.Thread(target=self._run, daemon=True, name="efecto-iman-open-windows").start()
@@ -271,7 +272,7 @@ class OpeningCapture:
         self._build_if_ready()
 
     def _finish_observation(self) -> None:
-        """Guarda el flujo hasta 60 s y conserva el archivo de 30 s anterior."""
+        """Guarda el flujo recibido hasta cada corte sin cambiar los anteriores."""
         with self._lock:
             if self._sequence_saved:
                 return
@@ -283,6 +284,8 @@ class OpeningCapture:
                 socket.close()
             except Exception:
                 pass
+        if not events:
+            return
         try:
             folder = DATA_DIR / "snapshots"
             folder.mkdir(parents=True, exist_ok=True)
@@ -310,9 +313,11 @@ class OpeningCapture:
                 if (now < deadline or seconds in self._window_building or
                         seconds in self._window_setups):
                     continue
-                self._window_building.add(seconds)
                 events = [quote for quote in self._quote_events
                           if quote.received_at <= deadline]
+                if not events:
+                    continue
+                self._window_building.add(seconds)
                 candles = self._prior_candles.copy()
                 threading.Thread(target=self._build_window,
                                  args=(seconds, events, candles), daemon=True,
@@ -363,7 +368,8 @@ class OpeningCapture:
                 self._window_setups[seconds] = setups
                 self._window_ready_at[seconds] = datetime.now(NEW_YORK)
                 self.version += 1
-                label = "1 minuto" if seconds == 60 else "30 segundos"
+                label = {30: "30 segundos", 60: "1 minuto",
+                         90: "1 minuto y medio"}[seconds]
                 self.status = (f"Corte de {label} listo: {len(latest)}/{len(self.tickers)} "
                                f"cotizaciones; {len(chosen)} candidatos preliminares")
         except Exception as exc:

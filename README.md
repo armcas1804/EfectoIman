@@ -25,31 +25,76 @@ sesiones recientes disponibles:
 .\.venv\Scripts\python.exe backfill_history.py
 ```
 
+### Inicio automático en Windows
+
+Desde PowerShell, dentro de `EfectoIman`, instala una vez la tarea de Windows:
+
+```powershell
+.\install_autostart.ps1
+```
+
+La tarea **EfectoIman Streamlit** ejecuta `start_efecto_iman.ps1` al iniciar
+sesión y de lunes a viernes a las 06:15, hora de Hermosillo en esta computadora.
+El script comprueba primero `http://127.0.0.1:8501/_stcore/health` y no abre una
+segunda copia si la aplicación ya responde. El resultado de cada intento queda
+en `data/streamlit_startup.log`; los errores del servidor quedan en
+`data/streamlit_autostart.err.log`. Para iniciarlo manualmente:
+
+```powershell
+.\start_efecto_iman.ps1
+```
+
+La computadora debe estar encendida, con sesión iniciada e Internet antes de
+la apertura. Una pestaña abierta por sí sola no mantiene activo el servidor.
+La tarea de Windows se puede revisar o desactivar en el Programador de tareas.
+
 ## Compartir una copia en Streamlit Community Cloud
 
-El repositorio de GitHub debe contener el código, `app.py`, `requirements.txt`
-y `.streamlit/config.toml`. El archivo `.gitignore` excluye la base SQLite,
-capturas, registros, copias de respaldo, entorno virtual y secretos locales.
-En Community Cloud selecciona este repositorio, la rama publicada y `app.py`
-como archivo principal. Selecciona Python 3.11 para coincidir con el entorno
-local probado.
+1. Inicia sesión en GitHub y crea un repositorio **vacío** llamado `EfectoIman`.
+   Para compartir con una sola persona, elige **Private**. No marques las
+   casillas para crear README, `.gitignore` o licencia: ya existe un repositorio
+   Git local con los dos primeros archivos.
+2. En PowerShell, desde esta carpeta, conecta el repositorio vacío. Sustituye
+   `TU_USUARIO` por tu nombre de usuario de GitHub:
+
+   ```powershell
+   git remote add origin https://github.com/TU_USUARIO/EfectoIman.git
+   git push -u origin main
+   ```
+
+   GitHub puede pedirte iniciar sesión en el navegador. Si `origin` ya existe,
+   comprueba su dirección con `git remote -v` antes de cambiarla.
+3. Inicia sesión en `https://share.streamlit.io/`, conecta GitHub y pulsa
+   **Create app** → **Yup, I have an app**. Elige el repositorio `EfectoIman`,
+   rama `main` y archivo principal `app.py`. En **Advanced settings** elige
+   Python 3.11. Pulsa **Deploy**.
+4. Abre la URL `*.streamlit.app` que te entregue Streamlit. Si la app es privada,
+   usa **Share** para invitar por correo a la persona que podrá verla. Para que
+   cualquier persona abra el enlace sin invitación, cambia la privacidad de la
+   app a pública desde **Sharing**.
+
+El repositorio incluye `requirements.txt` y `.streamlit/config.toml`. El
+`.gitignore` excluye la base SQLite, capturas, registros, copias de respaldo,
+entorno virtual y secretos locales; no subas `data/` ni claves de Alpaca.
 
 La instalación en la nube tiene su propia carpeta `data/`: no ve la base ni
 las etiquetas guardadas en esta computadora. La app crea una base nueva y puede
 descargar historial desde la interfaz. **Community Cloud no garantiza conservar
 archivos locales entre reinicios o redespliegues**, por lo que las revisiones
 manuales y los diagnósticos escritos allí se deben exportar si se quieren
-conservar. No uses esa copia como capturador fiable de los primeros 30 o 60
+conservar. No uses esa copia como capturador fiable de los primeros 30, 60 o 90
 segundos: las apps gratuitas pueden hibernar cuando no reciben visitas y
 reiniciarse; el corte en vivo exige un proceso activo antes de la apertura.
 La instalación local sigue siendo la fuente de las capturas de apertura.
 
 ## Revisión manual de gráficas
 
-La tercera sección, **Revisión manual**, muestra hasta 100 sesiones guardadas.
-Por defecto enseña aperturas fuera de la banda objetivo con gap de al menos
-1 %, aunque el score haya sido bajo. Se puede ampliar a todas las aperturas
-fuera de banda o a todos los símbolos, y filtrar sólo score final ≥ 70. Cada
+La sección **Revisión manual** muestra por defecto los candidatos guardados de
+**Historial prueba**, con su score, gap, distancia y ángulo del corte de 10 s.
+Permite filtrar por fecha, por candidatos, por descartados o por todos los casos con
+corte real de 10 s. Se pueden marcar como Mala las selecciones de prueba que
+fallaron visualmente. También se puede elegir **Historial actual** para revisar
+aperturas fuera de banda aunque el score final haya sido bajo. Cada
 página muestra 12, 24 o 50 gráficas. La vista **Apertura (15 min)** muestra la
 última hora del día previo y las primeras dos horas de la sesión. Calcula
 Bollinger con todas las velas disponibles antes de recortar lo visible. Las
@@ -59,10 +104,12 @@ Si falta el corte real, la pantalla indica que no está disponible.
 
 Cada caso admite **Excelente**, **Buena**, **Mala**, **Dudosa** o **Pendiente**. Las etiquetas se
 guardan en la tabla `manual_reviews` de SQLite; Pendiente significa que aún no
-se ha juzgado, no que sea Mala. El CSV de revisión exporta etiquetas junto con
+se ha juzgado, no que sea Mala. **Recalcular Historial prueba con mis juicios
+guardados** actualiza el experimento con las etiquetas disponibles y reserva
+fechas posteriores para validación. El CSV de revisión exporta etiquetas junto con
 variables disponibles en cada corte. El score final aparece sólo como columna
-de auditoría: no debe usarse para entrenar una predicción temprana. Esta vista
-no entrena un modelo ni cambia las alertas.
+de auditoría: no debe usarse para entrenar una predicción temprana. El botón
+de recálculo actualiza sólo el experimento; no cambia las alertas operativas.
 
 Los archivos históricos actuales contienen el primer y último negocio de los
 primeros 10 s, pero no su trayectoria íntegra ni cortes de 20/30 s. Para
@@ -229,12 +276,13 @@ sin apertura en el diagnóstico. El corte auditado se guarda en
 se recibe al menos una cotización. La vista histórica conserva su escaneo
 actual y no intenta reconstruir un corte de diez segundos con velas de 1 minuto.
 
-Los archivos `candidatos_apertura_30s_FECHA.csv` y
-`candidatos_apertura_60s_FECHA.csv` guardan las dos listas en `data/snapshots`;
-los archivos `diagnostico_apertura_30s_FECHA.csv` y
-`diagnostico_apertura_60s_FECHA.csv` guardan también los descartados. El flujo
+Los archivos `candidatos_apertura_30s_FECHA.csv`,
+`candidatos_apertura_60s_FECHA.csv` y `candidatos_apertura_90s_FECHA.csv`
+guardan las tres listas en `data/snapshots`; los archivos
+`diagnostico_apertura_30s_FECHA.csv`, `diagnostico_apertura_60s_FECHA.csv` y
+`diagnostico_apertura_90s_FECHA.csv` guardan también los descartados. El flujo
 público de Yahoo puede retrasarse u omitir mensajes: no se garantiza precio
-para los 72 símbolos en ninguno de los dos cortes.
+para los 72 símbolos en ninguno de los tres cortes.
 
 Para conservar y explicar una captura real, ejecuta
 `.\.venv\Scripts\python.exe audit_live_10s.py AAAA-MM-DD` desde esta carpeta.
@@ -258,17 +306,19 @@ recibido a los diez segundos y los 19 cierres previos calcula la banda BB(20,2)
 de 15 minutos provisional y su cambio respecto a la banda previa. Ese cambio
 es conocido a los diez segundos, pero no es una pendiente entre dos instantes
 posteriores a la apertura. A partir de la próxima captura, el flujo Yahoo se
-conserva hasta 60 segundos en `apertura_flujo_60s_AAAA-MM-DD.csv`; también se
-escribe `apertura_flujo_30s_AAAA-MM-DD.csv` para los análisis existentes. El archivo
+conserva hasta 90 segundos en `apertura_flujo_90s_AAAA-MM-DD.csv`; también se
+escriben `apertura_flujo_30s_AAAA-MM-DD.csv` y
+`apertura_flujo_60s_AAAA-MM-DD.csv` para los análisis existentes. El archivo
 `reaccion_bollinger_apertura_AAAA-MM-DD.csv` informa la pendiente de 10, 20 y
 30 segundos sólo si llegaron al equipo dos cotizaciones con marcas de mercado
 distintas antes de cada plazo; en caso contrario deja la pendiente vacía.
 
-La operativa diaria muestra primero los candidatos del corte de 30 segundos y
-los reemplaza por la lista congelada a 1 minuto cuando está lista. Conserva
-ambas tablas descargables para comparación. Hasta las 09:35 ET los ordena por
+La operativa diaria muestra primero los candidatos del corte de 30 segundos,
+luego los de 1 minuto y finalmente los de 1 minuto y medio (09:31:30 ET).
+Conserva las tres tablas descargables para comparación. Hasta las 09:35 ET los ordena por
 `score_open`; el ángulo posterior de cinco minutos no los elimina de esas
-listas. La tabla diagnóstica sigue mostrando
+listas. El corte de 90 segundos usa sólo cotizaciones recibidas hasta ese
+instante y la misma BB(20,2) de 15 minutos provisional. La tabla diagnóstica sigue mostrando
 el score de la etapa disponible. Desde las 09:35 la lista vuelve a los
 candidatos confirmados por el ángulo inicial. El reloj inicia la actualización
 de velas de 1 minuto al llegar a las 09:31; la lista se refresca cuando
@@ -333,11 +383,142 @@ exploratorias están en [scanner_settings.py](scanner_settings.py) y
 de rentabilidad.** La tabla se ordena por score y conserva todas las métricas,
 incluidos los casos sin candidato perfecto.
 
+### Evaluación con juicios visuales
+
+`evaluate_manual_labels.py` compara «Excelente» y «Buena» con «Mala»;
+excluye «Dudosa». Reconstruye gap, distancia, ancho previo y ángulo provisional
+usando sólo operaciones observadas hasta 10, 20 o 30 segundos. Entrena con
+fechas anteriores y prueba con fechas posteriores. El corte que equivale a
+score 70 se elige mediante predicciones cronológicas dentro del entrenamiento;
+la tasa de malas rechazadas pesa el doble de la de buenas detectadas, con un
+mínimo de 60 % de buenas detectadas en esos cortes de ajuste. Después de la
+validación, Historial prueba reajusta su modelo exploratorio con todas las
+etiquetas humanas que tienen corte real de 10 s. Por ello, los scores de casos
+ya etiquetados en esa vista no son una evaluación independiente. Escribe métricas JSON y
+predicciones CSV en `data/snapshots/manual_label_*`. El score del modelo es
+**experimental**: 70 corresponde al corte elegido en entrenamiento y no
+sustituye aún el score operativo.
+
+El experimento usa un bosque pequeño de árboles con el score operativo
+**recalculado al mismo corte** como sexta variable. Nunca usa el score final
+como variable de entrada. Una etiqueta «Excelente» pesa dos veces en el
+ajuste; «Buena» y «Mala» pesan una vez. El score no es una mezcla fija con el
+anterior: esa mezcla empeoró la clasificación en las fechas reservadas.
+Las importancias del modelo son descriptivas y no equivalen a los pesos de
+la estrategia. Los filtros geométricos de la lista de candidatos siguen
+vigentes, por lo que una buena clasificación del modelo puede quedar fuera
+de la lista; el reporte separa ambos resultados.
+Los juicios proceden de casos elegidos para revisión y no representan las 72
+empresas completas de cada día: una buena métrica en los casos etiquetados no
+valida automáticamente toda la tabla histórica.
+
+Ejecutar desde esta carpeta:
+
+```powershell
+.\.venv\Scripts\python.exe evaluate_manual_labels.py
+```
+
+La página **Historial prueba** reutiliza la misma vista de Historial:
+diagnóstico de apertura, lista de candidatos y gráficas con el botón «+».
+Para cada fecha muestra las 72 empresas. El score de prueba se muestra sólo
+si a los 10 segundos había gap suficiente y precio fuera de Bollinger; en
+otro caso aparece vacío con el motivo en «Estado a 10 s». No se recorta
+artificialmente a 69. El score heurístico de 10 s aparece vacío en la tabla
+principal cuando el precio estaba dentro de la banda; su cero real y el valor
+del modelo antes de las reglas siguen disponibles en «Comparación técnica».
+En Historial prueba puedes alternar entre «Señales con score prueba ≥70»
+para revisión visual y «Candidatos con filtros estrictos» para ver el filtro
+actual del scanner. La tabla indica la condición concreta que falla cuando
+una señal de score alto no entra en la lista estricta. Las gráficas siguen
+siendo las del historial original. La Revisión manual ofrece ambos grupos
+para poder etiquetar también las señales que el filtro descarta.
+«Recalcular con mis
+etiquetas» actualiza el experimento. Al final hay un resumen de las 50
+sesiones que permite verificar cuántos scores subieron y cuántas empresas
+quedaron arriba de 70. Los score finales <40 sin juicio manual no se usaron
+como etiquetas: una prueba exploratoria con ellos empeoró la separación.
+
+`study_10s_scoring.py` compara el score heurístico y tres clasificadores
+utilizando exclusivamente casos con gap suficiente y precio fuera de banda
+a los 10 s. Elige cada umbral mediante cortes cronológicos dentro de las
+fechas de entrenamiento y evalúa después en fechas posteriores. Escribe un
+JSON resumido y un CSV por caso en `data/snapshots/ten_second_scoring_study_*`.
+Los juicios existentes no son una muestra aleatoria de las 72 empresas, así
+que el estudio no establece todavía pesos ideales para todo el universo.
+
+```powershell
+.\.venv\Scripts\python.exe study_10s_scoring.py
+```
+
+Para poblar cortes históricos de 20 y 30 segundos, usar el comando de
+`backfill_30s_alpaca.py` descrito arriba y repetir la evaluación. El modelo
+sólo se entrena para un corte cuando hay suficientes fechas y ambas clases.
+
+### Estudio supervisado de 10 a 60 segundos
+
+`study_early_ai.py` aprende a separar los juicios visuales Excelente/Buena de
+Mala con datos existentes al corte. Usa gap, distancia a Bollinger, ancho y
+reacción provisional de la banda, ángulo y cantidad de operaciones. No usa el
+score previo como variable ni impone un máximo de 25° o un gap mínimo. Separa
+las fechas cronológicamente y elige el umbral sólo con el entrenamiento.
+También informa una prueba exploratoria de tres clases y compara el modelo con
+versiones sin ángulo o sólo con gap y distancia.
+
+```powershell
+.\.venv\Scripts\python.exe study_early_ai.py
+```
+
+Los cortes históricos faltantes pueden descargarse en el mismo formato SIP
+de Alpaca, si `APCA_API_KEY_ID` y `APCA_API_SECRET_KEY` ya están disponibles
+en el entorno de la terminal:
+
+```powershell
+.\.venv\Scripts\python.exe backfill_30s_alpaca.py --days 50 --seconds 60
+.\.venv\Scripts\python.exe study_early_ai.py
+```
+
+El primer comando guarda cortes independientes de 10, 20, 30, 40, 50 y 60
+segundos y una trayectoria por segundo. Si faltan credenciales, la descarga
+se detiene sin crear datos inventados. Los tiempos históricos corresponden a
+operaciones del mercado y no prueban cuándo habrían llegado por red al equipo.
+Las etiquetas actuales provienen de casos seleccionados para revisión; las
+métricas no representan por sí solas a las 72 empresas ni autorizan cambiar
+automáticamente el score operativo.
+
+La auditoría del estudio aplica el score IA a todas las aperturas históricas
+con corte real de 10 segundos. Se muestra separada de **Historial prueba**:
+muchos casos del universo no tienen juicio visual, así que un score alto no
+equivale a un acierto. En **Revisión manual → Auditoría IA** se puede elegir
+**Muestra equilibrada sin etiqueta** para revisar casos de score bajo, medio
+y alto que abrieron fuera de la banda y ampliar el conjunto etiquetado. Cada
+juicio se guarda al pulsar la opción. **Recalcular auditoría IA** actualiza
+esa vista con las etiquetas guardadas; para recalcular también la evaluación
+reservada por fechas, ejecutar `study_early_ai.py` completo. Desde terminal,
+la auditoría sola se actualiza con:
+
+```powershell
+.\.venv\Scripts\python.exe study_early_ai.py --audit-only
+```
+
+**Historial prueba** muestra una comparación explícita entre el score original
+calculado a los 10 segundos, el score de prueba a los 10 segundos y el score
+original calculado tras la primera vela de 15 minutos. El tercero dispone de
+información posterior y no representa una alerta disponible a los 10 segundos.
+En **Revisión manual → Historial prueba**, los filtros iniciales muestran
+aperturas sin juicio con score original de 10 segundos por encima o por debajo
+de 70. Sirven para obtener etiquetas directamente del método que se desea
+mejorar. Ningún peso del score operativo se cambia automáticamente por los
+resultados de un grupo de casos escogidos para revisión.
+
 El ángulo se calcula como `grados(atan(((banda_actual/banda_anterior)-1)
 × 100 × 5/minutos_transcurridos))`. `target_angle_score` vale 1 cuando la
 banda está plana o cerrándose; disminuye gradualmente hasta 0.4 a 25° y llega
 a 0 a 70°. Su peso es 5. La expansión del ancho total pesa 0.75 solo después
 del cierre de 09:45; la reversión de la primera vela pesa 0.25.
+En los cortes de 10, 20 y 30 segundos, el score de apertura resta puntos
+si el ancho provisional de BB(20,2) supera el doble del ancho previo:
+`penalización = min(30, 10 × max(ancho_provisional/ancho_previo − 2, 0))`.
+Es una corrección experimental del score, no un filtro de candidatos.
 Los campos `score_*_component` muestran la contribución en puntos de cada
 componente al score final.
 
@@ -389,3 +570,31 @@ las nuevas empresas en hasta 100 sesiones disponibles.
 La exportación contiene `diagnosticos.csv`, `velas_15m.csv` y
 `resultados_descriptivos.csv`. Los resultados descriptivos no son retornos
 ejecutables: no modelan comisiones, spreads, préstamo ni contratos.
+
+## Estudio experimental de cortes subminuto
+
+`python study_cutoff_models.py` compara cortes reales de 10, 20 y 30 segundos
+con los juicios manuales Excelente/Buena/Mala. Sólo usa operaciones anteriores
+al corte y aperturas que todavía están fuera de la banda provisional BB(20,2)
+de 15 minutos. Selecciona variables, clasificador y umbral con fechas de
+entrenamiento anteriores; después prueba fechas posteriores y repite una
+evaluación progresiva por bloques. Guarda JSON y CSV en `data/snapshots/` y
+presenta el resumen en **Historial prueba**. También genera
+`cutoff_model_history_20s_*.csv` para los 72 símbolos de cada sesión: la tabla
+diagnóstica, la lista ordenada y las marcas de las gráficas de **Historial
+prueba** usan el corte de 20 segundos. La lista muestra inicialmente las ocho
+señales mejor puntuadas con gap mínimo de 1%; ambos controles de la página
+permiten ajustar la revisión y ver todas. Las
+puntuaciones históricas de esa vista se ajustan con todos los juicios guardados
+y pueden incluir el propio caso o juicios posteriores a esa fecha. Son para
+revisión visual, no para medir aciertos fuera de muestra.
+
+En el estudio del 16 de octubre de 2026, el bosque aleatorio de 20 segundos
+fue el mejor según la validación temporal interna. En cuatro bloques
+posteriores con 88 juicios, detectó 40/55 casos Buenos/Excelentes y rechazó
+22/33 Malos. El score operativo ≥70 detectó 35/55 y rechazó 15/33,
+respectivamente. Las etiquetas fueron elegidas para revisión, no muestreadas
+al azar; algunas fechas se habían examinado antes y el tiempo de la operación
+histórica SIP no representa la latencia real de recepción. Por ello, el
+modelo sigue siendo experimental y no reemplaza el score operativo de
+**Operativa diaria** o **Historial**.

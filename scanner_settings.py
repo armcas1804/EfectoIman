@@ -43,3 +43,8 @@ SCORE_SCALES = {
     "first_minute_reversal_pct": 0.25,
     "post_open_expansion_pct": 25.0,
 }
+
+# Ajuste exploratorio del score subminuto: sólo penaliza expansión muy marcada.
+SCORE_CUTOFF_WIDTH_RATIO_GRACE = 2.0
+SCORE_CUTOFF_WIDTH_PENALTY_PER_RATIO = 10.0
+SCORE_CUTOFF_WIDTH_PENALTY_MAX = 30.0

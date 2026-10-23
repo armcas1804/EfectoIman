@@ -103,7 +103,8 @@ def _historical_ten_seconds(day: str, path: Path) -> pd.DataFrame:
     return result.loc[result.price.gt(0), list(EARLY_COLUMNS)]
 
 
-def _historical_thirty_seconds(day: str, path: Path) -> pd.DataFrame:
+def _historical_thirty_seconds(day: str, path: Path,
+                               max_seconds: int = 30) -> pd.DataFrame:
     if not path.is_file():
         return pd.DataFrame(columns=EARLY_COLUMNS)
     trades = pd.read_csv(path)
@@ -117,13 +118,15 @@ def _historical_thirty_seconds(day: str, path: Path) -> pd.DataFrame:
     result = pd.DataFrame({
         "session_date": day, "ticker": trades.ticker,
         "window_seconds": pd.to_numeric(trades.window_seconds, errors="coerce"),
-        "source": "alpaca_sip_historical_trades_30s", "price": trades.price_at_cutoff,
+        "source": f"alpaca_sip_historical_trades_{max_seconds}s",
+        "price": trades.price_at_cutoff,
         "first_price": trades.price_first, "first_time": trades.first_trade_at_et,
         "last_time": trades.last_trade_at_et, "event_count": trades.trade_count,
     })
     result["price"] = pd.to_numeric(result.price, errors="coerce")
     return result.loc[result.price.gt(0) &
-                      result.window_seconds.isin([10, 20, 30]), list(EARLY_COLUMNS)]
+                      result.window_seconds.isin(range(10, max_seconds + 1, 10)),
+                      list(EARLY_COLUMNS)]
 
 
 def early_observations(day: str, snapshot_dir: Path = DATA_DIR / "snapshots") -> pd.DataFrame:
@@ -132,19 +135,25 @@ def early_observations(day: str, snapshot_dir: Path = DATA_DIR / "snapshots") ->
                                           snapshot_dir / f"apertura_historica_10s_{day}.csv")
     historical_30 = _historical_thirty_seconds(day,
                                                 snapshot_dir / f"apertura_historica_30s_{day}.csv")
+    historical_60 = _historical_thirty_seconds(day,
+                                                snapshot_dir / f"apertura_historica_60s_{day}.csv",
+                                                max_seconds=60)
     sixty_path = snapshot_dir / f"apertura_flujo_60s_{day}.csv"
     live = (_live_windows(day, sixty_path, (10, 20, 30, 60)) if sixty_path.is_file()
             else _live_windows(day, snapshot_dir / f"apertura_flujo_30s_{day}.csv",
                                (10, 20, 30)))
-    frames = [frame for frame in (historical, historical_30, live) if not frame.empty]
+    frames = [frame for frame in (historical, historical_30, historical_60, live)
+              if not frame.empty]
     result = (pd.concat(frames, ignore_index=True)
               if frames else pd.DataFrame(columns=EARLY_COLUMNS))
     if result.empty:
         return result
     # La captura local tiene precedencia para el corte de 10 s si hay ambas fuentes.
-    result["priority"] = result.source.map({"captura_local": 0,
-                                               "alpaca_sip_historical_trades_30s": 1,
-                                               "alpaca_sip_historical_trades": 2})
+    result["priority"] = result.source.map({
+        "captura_local": 0,
+        "alpaca_sip_historical_trades_60s": 1,
+        "alpaca_sip_historical_trades_30s": 2,
+        "alpaca_sip_historical_trades": 3})
     return (result.sort_values("priority").drop_duplicates(
         ["session_date", "ticker", "window_seconds"]).drop(columns="priority")
         .sort_values(["ticker", "window_seconds"]).reset_index(drop=True))
@@ -170,7 +179,9 @@ def early_trajectory(day: str, ticker: str,
             if not rows.empty:
                 return rows[["second_after_open", "price"]].sort_values(
                     "second_after_open").reset_index(drop=True)
-    historical_path = snapshot_dir / f"apertura_historica_trayectoria_30s_{day}.csv"
+    historical_path = snapshot_dir / f"apertura_historica_trayectoria_60s_{day}.csv"
+    if not historical_path.is_file():
+        historical_path = snapshot_dir / f"apertura_historica_trayectoria_30s_{day}.csv"
     if historical_path.is_file():
         rows = pd.read_csv(historical_path)
         if {"ticker", "second_after_open", "price"}.issubset(rows):
@@ -178,7 +189,7 @@ def early_trajectory(day: str, ticker: str,
             rows["second_after_open"] = pd.to_numeric(rows.second_after_open,
                                                        errors="coerce")
             rows["price"] = pd.to_numeric(rows.price, errors="coerce")
-            return rows.loc[rows.second_after_open.between(0, 30) &
+            return rows.loc[rows.second_after_open.between(0, 60) &
                             rows.price.gt(0)].sort_values("second_after_open")
     return pd.DataFrame(columns=["second_after_open", "price"])
 

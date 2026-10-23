@@ -9,6 +9,9 @@ import pandas as pd
 from indicators import BOLLINGER_DEVIATIONS, BOLLINGER_WINDOW, bollinger_bands
 from scanner_settings import (DEFAULT_THRESHOLDS, SCORE_SCALES, SCORE_WEIGHTS,
                               MAX_5MIN_BAND_SLOPE_PCT_PER_MIN, MAX_UPPER_ANGLE_DEG,
+                              SCORE_CUTOFF_WIDTH_RATIO_GRACE,
+                              SCORE_CUTOFF_WIDTH_PENALTY_PER_RATIO,
+                              SCORE_CUTOFF_WIDTH_PENALTY_MAX,
                               ScannerThresholds)
 
 
@@ -29,7 +32,7 @@ SETUP_COLUMNS = [
     "score_gap_component", "score_distance_component",
     "score_compression_component", "score_prior_width_growth_component",
     "score_target_angle_component", "score_first_minute_component",
-    "score_post_open_expansion_component",
+    "score_post_open_expansion_component", "score_cutoff_expansion_component",
     "first_minute_open", "first_minute_high", "first_minute_low", "first_minute_close",
     "first_minute_return_pct", "first_minute_body_pct", "first_minute_reversal_pct",
     "post_open_bb_width_pct", "post_open_bb_width_change",
@@ -243,7 +246,8 @@ def _score(metrics: dict, stage: str, breakdown: dict | None = None) -> float:
             for column in ("score_gap_component", "score_distance_component",
                            "score_compression_component", "score_prior_width_growth_component",
                            "score_target_angle_component", "score_first_minute_component",
-                           "score_post_open_expansion_component"):
+                           "score_post_open_expansion_component",
+                           "score_cutoff_expansion_component"):
                 breakdown[column] = 0.0
         return 0.0
     values = {
@@ -267,8 +271,22 @@ def _score(metrics: dict, stage: str, breakdown: dict | None = None) -> float:
             SCORE_SCALES["post_open_expansion_pct"])
     available = {key: value for key, value in values.items() if np.isfinite(value)}
     total = sum(SCORE_WEIGHTS[key] for key in available)
+    cutoff_penalty = 0.0
+    if stage == "open":
+        upper = metrics.get("cutoff_bb_upper", np.nan)
+        lower = metrics.get("cutoff_bb_lower", np.nan)
+        prior_width = metrics.get("prior_bb_width_pct", np.nan)
+        if (np.isfinite(upper) and np.isfinite(lower) and
+                np.isfinite(prior_width) and prior_width > 0):
+            cutoff_width = _width(upper, lower, (upper + lower) / 2)
+            if np.isfinite(cutoff_width):
+                width_ratio = cutoff_width / prior_width
+                cutoff_penalty = min(SCORE_CUTOFF_WIDTH_PENALTY_MAX,
+                                     SCORE_CUTOFF_WIDTH_PENALTY_PER_RATIO *
+                                     max(width_ratio - SCORE_CUTOFF_WIDTH_RATIO_GRACE, 0))
     if breakdown is not None:
         breakdown["target_angle_score"] = available.get("target_angle", np.nan)
+        breakdown["score_cutoff_expansion_component"] = -cutoff_penalty
         for component, key in (
                 ("score_gap_component", "gap"),
                 ("score_distance_component", "distance"),
@@ -279,7 +297,9 @@ def _score(metrics: dict, stage: str, breakdown: dict | None = None) -> float:
                 ("score_post_open_expansion_component", "post_open_expansion")):
             breakdown[component] = (100 * SCORE_WEIGHTS[key] * available[key] / total
                                     if key in available else 0.0)
-    return round(100 * sum(SCORE_WEIGHTS[key] * value for key, value in available.items()) / total, 1)
+    return round(max(0.0, 100 * sum(SCORE_WEIGHTS[key] * value
+                                    for key, value in available.items()) / total
+                     - cutoff_penalty), 1)
 
 
 def _ordered_bars(raw: pd.DataFrame) -> pd.DataFrame:
@@ -372,7 +392,7 @@ def opening_setups(candles: pd.DataFrame, first_minutes: pd.DataFrame | None = N
         target_values = tail.bb_upper if sign == 1 else tail.bb_lower
         slope = _linear_slope(target_values, float(target_values.iloc[-1]))
         distance = _distance(opening, band, sign)
-        subminute_cutoff = (cutoff_seconds in (10, 30, 60) and ticker in opening_prices
+        subminute_cutoff = (cutoff_seconds in (10, 30, 60, 90) and ticker in opening_prices
                             and minute is None and first is None)
         if subminute_cutoff:
             cutoff_upper, cutoff_lower = _provisional_bands(prior, opening)
