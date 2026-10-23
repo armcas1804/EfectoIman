@@ -47,9 +47,22 @@ def build_daily_chart(candles: pd.DataFrame, ticker: str, gap_pct: float,
         opening_price = float(series.iloc[-1].close) * (1 + gap_pct / 100)
         figure.add_annotation(x=first_index, y=opening_price, text=f"Gap {gap_pct:+.2f}%",
                               showarrow=True, arrowhead=2, ay=-35, bgcolor="#f7f7f7")
-    if cutoff_seconds in (20, 30, 60) and pd.notna(cutoff_price):
-        label = "1 min" if cutoff_seconds == 60 else f"{cutoff_seconds} s"
+    if cutoff_seconds in (20, 30, 60, 90) and pd.notna(cutoff_price):
+        label = {60: "1 min", 90: "1.5 min"}.get(cutoff_seconds,
+                                                   f"{cutoff_seconds} s")
         cutoff_x = first_index - .43 if not current.empty else first_index
+        prior = series.loc[series.session == "PREVIA"]
+        if not prior.empty:
+            last = prior.iloc[-1]
+            for band_name, prior_value, cut_value, color in (
+                    ("Superior", last.bb_upper, cutoff_upper, "#2e7894"),
+                    ("Inferior", last.bb_lower, cutoff_lower, "#808080")):
+                if pd.notna(prior_value) and pd.notna(cut_value):
+                    figure.add_trace(go.Scatter(
+                        x=[last.bar_index, cutoff_x], y=[prior_value, cut_value],
+                        mode="lines+markers", name=f"{band_name} provisional {label}",
+                        line=dict(color=color, width=2.5, dash="dash"),
+                        marker=dict(size=[4, 10], symbol="diamond")))
         figure.add_trace(go.Scatter(x=[cutoff_x], y=[cutoff_price],
                                     mode="markers+text", text=[label],
                                     textposition="top right", name=f"Precio {label}",
@@ -59,7 +72,7 @@ def build_daily_chart(candles: pd.DataFrame, ticker: str, gap_pct: float,
             if pd.notna(band_price):
                 figure.add_trace(go.Scatter(x=[cutoff_x], y=[band_price],
                                             mode="markers", name=f"{band_name} {label}",
-                                            marker=dict(size=9, color=color, symbol="diamond")))
+                                            marker=dict(size=12, color=color, symbol="diamond")))
     if pd.notna(first_minute_close):
         figure.add_trace(go.Scatter(x=[first_index], y=[first_minute_close],
                                     mode="markers", name="09:31 ET",
@@ -88,7 +101,7 @@ def build_daily_chart(candles: pd.DataFrame, ticker: str, gap_pct: float,
     ticks = series.iloc[sorted(tick_indexes)]
     figure.update_layout(
         title=dict(text=f"{ticker}  /  15 MIN  /  {target_band}" +
-                   (f"  /  CORTE {cutoff_seconds} S" if cutoff_seconds in (20, 30, 60) else ""),
+                   (f"  /  CORTE {cutoff_seconds} S" if cutoff_seconds in (20, 30, 60, 90) else ""),
                    font=dict(family="Georgia, serif", size=17)),
         height=355, margin=dict(l=12, r=12, t=52, b=20),
         paper_bgcolor="#f7f7f7", plot_bgcolor="#f7f7f7", font=dict(color="#333333", size=11),

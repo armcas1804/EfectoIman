@@ -113,19 +113,20 @@ def build_home_chart(candles: pd.DataFrame, ticker: str, cutoff_seconds: int,
     prior = series.loc[series.session == "PREVIA"]
     if not prior.empty:
         last = prior.iloc[-1]
-        for label, previous, band_at_cut in (
-                ("Superior al corte", float(last.bb_upper), cutoff_upper),
-                ("Inferior al corte", float(last.bb_lower), cutoff_lower)):
+        for label, previous, band_at_cut, color in (
+                ("Superior al corte", float(last.bb_upper), cutoff_upper, "#5cc2dd"),
+                ("Inferior al corte", float(last.bb_lower), cutoff_lower, "#b9a5e8")):
             if math.isfinite(previous) and math.isfinite(band_at_cut):
                 figure.add_trace(go.Scatter(
                     x=[float(last.bar_index), cutoff_x], y=[previous, band_at_cut],
-                    mode="lines", name=label, showlegend=False,
-                    line=dict(color="#e5ebed", width=1.4, dash="dash"),
+                    mode="lines+markers", name=label, showlegend=False,
+                    line=dict(color=color, width=3, dash="dash"),
+                    marker=dict(color=color, size=[5, 12], symbol="diamond"),
                     hovertemplate=f"{label}: %{{y:.2f}}<extra></extra>"))
     for label, price, color, symbol in (
             ("Precio del corte", cutoff_price, "#f3cc70", "diamond"),
-            ("Banda superior provisional", cutoff_upper, "#e9edf0", "circle"),
-            ("Banda inferior provisional", cutoff_lower, "#e9edf0", "circle")):
+            ("Banda superior provisional", cutoff_upper, "#5cc2dd", "circle"),
+            ("Banda inferior provisional", cutoff_lower, "#b9a5e8", "circle")):
         if math.isfinite(price):
             figure.add_trace(go.Scatter(
                 x=[cutoff_x], y=[price], mode="markers", name=label,

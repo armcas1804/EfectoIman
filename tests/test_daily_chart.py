@@ -29,6 +29,22 @@ class DailyChartTests(unittest.TestCase):
         self.assertEqual(float(traces["Superior provisional 20 s"].y[0]), 101.4)
         self.assertLess(float(traces["Precio 20 s"].x[0]), 25)
 
+    def test_ninety_second_cut_shows_provisional_bollinger(self):
+        candles = pd.DataFrame([{
+            "ticker": "AAL", "bar_index": index, "session": "PREVIA",
+            "time": "15:45", "open": 100.0, "high": 100.5,
+            "low": 99.5, "close": 100.0,
+        } for index in range(26)])
+        chart = build_daily_chart(candles, "AAL", 2.0, -1, float("nan"),
+                                  cutoff_seconds=90, cutoff_price=102.0,
+                                  cutoff_upper=101.5, cutoff_lower=98.5)
+        traces = {trace.name: trace for trace in chart.data}
+        self.assertIn("CORTE 90 S", chart.layout.title.text)
+        self.assertEqual(float(traces["Superior provisional 1.5 min"].y[-1]),
+                         101.5)
+        self.assertEqual(float(traces["Inferior provisional 1.5 min"].y[-1]),
+                         98.5)
+
     def test_opening_focus_keeps_four_prior_and_eight_current_candles(self):
         candles = pd.DataFrame([
             {

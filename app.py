@@ -662,6 +662,10 @@ def home_panel() -> None:
     if selected is None:
         return
     row = candidates.loc[candidates.ticker == selected].iloc[0]
+    band_values = st.columns(3)
+    band_values[0].metric(f"Precio · {cut_clock} ET", f"{row.opening_price:.3f}")
+    band_values[1].metric("Bollinger superior provisional", f"{row.cutoff_bb_upper:.3f}")
+    band_values[2].metric("Bollinger inferior provisional", f"{row.cutoff_bb_lower:.3f}")
     refresher = market_refresh(day, 2)
     market_window = (now.weekday() < 5 and (9, 31) <= (now.hour, now.minute) <= (16, 15))
     if market_window:
