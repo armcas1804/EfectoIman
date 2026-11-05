@@ -20,6 +20,7 @@ from home_chart import build_home_chart
 from daily_store import (export_history, initialize_daily_store,
                          load_daily_session, save_daily_session, session_dates)
 from outcomes import build_outcomes
+from opening_scan import _provisional_bands
 from opening_live import CaptureProgress, DISPLAY_WINDOWS, OpeningCapture, next_capture_day
 from market_refresh import MarketRefresh
 from manual_review import (LABELS, build_early_chart, early_features,
@@ -28,6 +29,7 @@ from manual_review import (LABELS, build_early_chart, early_features,
 from signal_audit import first_availability
 from scanner_settings import DEFAULT_THRESHOLDS
 from subminute_history import ten_second_coverage
+from trial_variants import add_low_volatility, opening_reversal_table
 
 
 NY = ZoneInfo("America/New_York")
@@ -359,7 +361,9 @@ def diagnostic_table(setups: pd.DataFrame, trial: bool = False,
     columns = (['ticker', 'score', 'trial_signal_status',
                 'trial_failed_conditions_10s', 'trial_candidate',
                 'manual_label', 'trial_gap_10s_pct', 'trial_distance_10s_pct',
-                'trial_angle_10s_deg', 'trial_score_actual_10s',
+                'trial_angle_10s_deg', 'trial_prior_width_pct',
+                'trial_width_limit_pct', 'trial_low_volatility',
+                'trial_score_actual_10s',
                 'trial_score_final_original', 'early_data_status'] +
                (['model_training_example'] if trial_seconds == 20 else [])
                if trial else DISPLAY_COLUMNS)
@@ -379,6 +383,9 @@ def diagnostic_table(setups: pd.DataFrame, trial: bool = False,
                      "trial_gap_10s_pct": f"Gap a {trial_seconds} s",
                      "trial_distance_10s_pct": f"Distancia a {trial_seconds} s",
                      "trial_angle_10s_deg": f"Ángulo a {trial_seconds} s",
+                     "trial_prior_width_pct": "Ancho BB previo (%)",
+                     "trial_width_limit_pct": "Máximo ancho A (%)",
+                     "trial_low_volatility": "Baja volatilidad A",
                      "trial_candidate": "Señal del modelo" if trial_seconds == 20 else
                                         "Candidato estricto",
                      "model_training_example": "Juicio usado para entrenar",
@@ -763,6 +770,10 @@ def trial_session_setups(setups: pd.DataFrame, day_rows: pd.DataFrame,
             ("early_data_status", "early_data_status"),
             ("trial_candidate", "trial_candidate_20s"),
             ("model_training_example", "model_training_example"),
+            ("trial_prior_width_pct", "prior_width_pct"),
+            ("trial_width_limit_pct", "trial_width_limit_pct"),
+            ("trial_low_volatility", "trial_low_volatility"),
+            ("trial_width_status", "trial_width_status"),
         )
         for destination, source in mapping:
             result[destination] = (result.ticker.map(trial[source])
@@ -812,9 +823,10 @@ def trial_session_setups(setups: pd.DataFrame, day_rows: pd.DataFrame,
 
 
 def trial_history_panel() -> None:
-    st.subheader("Historial prueba")
+    st.subheader("Historial prueba A")
     st.caption("Diagnóstico de apertura, señales para revisar y gráficas ordenadas "
-               "por el modelo experimental del corte de 20 segundos.")
+               "por el modelo experimental de 20 segundos, con un filtro "
+               "adicional de baja volatilidad previa.")
     st.info("La banda es BB(20,2) de velas de 15 minutos, calculada "
             "provisionalmente con operaciones disponibles hasta 09:30:20 ET. "
             "El modelo de esta vista se ajustó retrospectivamente con todos los "
@@ -841,6 +853,39 @@ def trial_history_panel() -> None:
         return
     history = pd.read_csv(files[-1])
     model_history = pd.read_csv(model_files[-1])
+    volatility_controls = st.columns(2)
+    max_width = volatility_controls[0].slider(
+        "Ancho BB previo máximo (%)", 0.25, 4.0, 1.5, step=0.05,
+        key="trial_a_max_width")
+    relative_percentile = volatility_controls[1].slider(
+        "Percentil bajo del mismo símbolo", 10, 50, 25, step=5,
+        key="trial_a_relative_percentile")
+    all_setups, _ = export_history(HISTORY_SESSION_LIMIT)
+    model_history = add_low_volatility(
+        model_history, all_setups, max_width_pct=max_width,
+        relative_quantile=relative_percentile / 100)
+    st.caption("Baja volatilidad = ancho BB previo ≤ límite absoluto y ≤ el "
+               f"percentil {relative_percentile} de sus 20 sesiones anteriores. "
+               "Con menos de 10 sesiones anteriores se usa sólo el límite "
+               "absoluto. La referencia nunca incorpora fechas posteriores. "
+               "El score A conserva su valor; el filtro determina si entra "
+               "en la lista.")
+    base_signals = int(model_history.trial_candidate_model_20s.sum())
+    low_vol_signals = int(model_history.trial_candidate_20s.sum())
+    st.caption(f"En las {model_history.session_date.nunique()} sesiones del modelo: "
+               f"{base_signals} señales antes del nuevo filtro y "
+               f"{low_vol_signals} después. Esta comparación es descriptiva; "
+               "no mide aciertos en fechas nuevas.")
+    with st.expander("Cómo cambian los casos que ya etiqueté"):
+        labeled = model_history.loc[model_history.manual_label.isin(
+            ("Excelente", "Buena", "Mala"))]
+        comparison = labeled.groupby("manual_label").agg(
+            etiquetadas=("ticker", "size"),
+            seleccionadas_modelo=("trial_candidate_model_20s", "sum"),
+            seleccionadas_A=("trial_candidate_20s", "sum"))
+        st.dataframe(comparison.reset_index(), hide_index=True, width="stretch")
+        st.caption("El modelo ya se entrenó con varios de estos juicios. "
+                   "Esta tabla sólo ayuda a ver qué descarta el nuevo filtro.")
     model_metadata_path = model_files[-1].with_suffix(".json")
     if model_metadata_path.exists():
         import json
@@ -902,7 +947,8 @@ def trial_history_panel() -> None:
     st.caption(f"{selected_day} · {len(trial_setups)} símbolos analizados · "
                f"{available} con operación real antes de 20 s. "
                "La lista exige precio fuera de Bollinger al corte, dirección "
-               "coherente con la apertura e índice experimental ≥70. "
+               "coherente con la apertura, índice experimental ≥70 y baja "
+               "volatilidad previa. "
                f"Hay {total_signals} señales según el modelo, {signal_count} "
                f"con gap de al menos {min_gap:.2f}%; se muestran "
                f"las {max_signals} mejor puntuadas en la lista. "
@@ -917,7 +963,7 @@ def trial_history_panel() -> None:
     stamp = files[-1].stem.removeprefix("manual_label_history_trial_")
     summary_file = snapshot_dir / f"manual_label_daily_summary_{stamp}.csv"
     report_file = snapshot_dir / f"manual_label_validation_{stamp}.json"
-    with st.expander("Evaluación de las 50 sesiones y comparación de scores"):
+    with st.expander("Evaluación anterior del modelo, sin filtro de volatilidad"):
         if not summary_file.exists():
             st.info("Recalcula la comparación para obtener el resumen de 50 sesiones.")
             return
@@ -1235,6 +1281,115 @@ def trial_history_panel() -> None:
                        "independiente antes de cambiar el score operativo.")
 
 
+def trial_history_b_panel() -> None:
+    st.subheader("Historial prueba B")
+    st.caption("Regla de dos datos: gap en la primera operación y movimiento "
+               "posterior hacia el cierre previo. No usa score ni Bollinger "
+               "para seleccionar; la gráfica permite revisar el resultado.")
+    snapshot_dir = DATA_DIR / "snapshots"
+    days_with_cuts = set()
+    for pattern, prefix in (("apertura_historica_30s_*.csv", "apertura_historica_30s_"),
+                            ("apertura_flujo_30s_*.csv", "apertura_flujo_30s_"),
+                            ("apertura_flujo_60s_*.csv", "apertura_flujo_60s_")):
+        days_with_cuts.update(path.stem.removeprefix(prefix)
+                              for path in snapshot_dir.glob(pattern))
+    dates = [day for day in session_dates() if day in days_with_cuts]
+    if not dates:
+        st.info("Faltan cortes históricos de segundos y sesiones con velas de 15 minutos.")
+        return
+    controls = st.columns(3)
+    selected_day = controls[0].selectbox("Fecha de sesión", dates, key="trial_b_date")
+    seconds = controls[1].selectbox("Corte después de abrir", (10, 20, 30),
+                                    index=1, format_func=lambda value: f"{value} segundos",
+                                    key="trial_b_seconds")
+    min_gap = controls[2].slider("Gap mínimo (%)", 0.0, 5.0,
+                                 float(DEFAULT_THRESHOLDS.minimum_gap_pct or 0.0),
+                                 step=0.25, key="trial_b_min_gap")
+    chart_context(f"trial_b:{selected_day}:{seconds}")
+    setups, candles, _ = load_daily_session(selected_day)
+    observations = review_observations(selected_day)
+    result = opening_reversal_table(setups, observations, seconds, min_gap)
+    reviews = load_reviews().loc[lambda frame: frame.session_date.eq(selected_day)]
+    if not reviews.empty:
+        result["juicio_visual"] = result.ticker.map(
+            reviews.set_index("ticker").label).fillna("Pendiente")
+    else:
+        result["juicio_visual"] = "Pendiente"
+    available = int(result.price_at_cutoff.notna().sum())
+    selected = result.loc[result.candidate]
+    summary = st.columns(3)
+    summary[0].metric("Símbolos en la sesión", len(result))
+    summary[1].metric(f"Con datos a {seconds} s", available)
+    summary[2].metric("Gap y giro observados", len(selected))
+    st.caption("Gap = (primera operación / cierre previo − 1) × 100. "
+               "Giro = (primera operación − precio al corte) / primera operación × 100 "
+               "para gap alcista; signo inverso para gap bajista. Entra si el gap "
+               "supera el mínimo elegido y el giro es positivo. El precio al corte "
+               "es la última operación disponible hasta ese segundo.")
+    st.subheader("Diagnóstico de apertura")
+    columns = ["ticker", "status", "candidate", "previous_close", "first_price",
+               "price_at_cutoff", "gap_at_open_pct", "gap_direction",
+               "reversal_pct", "first_time", "last_time", "event_count",
+               "juicio_visual", "source"]
+    st.dataframe(result.reindex(columns=columns), hide_index=True, width="stretch",
+                 column_config={
+                     "ticker": "Símbolo", "status": "Estado B", "candidate": "Candidato B",
+                     "previous_close": st.column_config.NumberColumn(
+                         "Cierre previo", format="%.3f"),
+                     "first_price": st.column_config.NumberColumn(
+                         "Primera operación", format="%.3f"),
+                     "price_at_cutoff": st.column_config.NumberColumn(
+                         f"Precio a {seconds} s", format="%.3f"),
+                     "gap_at_open_pct": st.column_config.NumberColumn("Gap inicial (%)", format="%.2f"),
+                     "gap_direction": "Dirección", "reversal_pct":
+                         st.column_config.NumberColumn("Giro hacia cierre (%)", format="%.3f"),
+                     "first_time": "Primera operación ET", "last_time": "Última operación ET",
+                     "event_count": "Operaciones", "juicio_visual": "Juicio visual",
+                     "source": "Fuente"})
+    st.download_button("Descargar diagnóstico B (CSV)", result.to_csv(index=False),
+                       file_name=f"historial_prueba_b_{selected_day}_{seconds}s.csv",
+                       mime="text/csv")
+    st.subheader("Candidatos y gráficas")
+    st.caption("Ordenados por tamaño del gap y después por magnitud del giro. "
+               "El gráfico completo usa velas posteriores sólo para revisión visual; "
+               "esas velas no intervienen en la regla B.")
+    left, right = st.columns([.95, 1.75], gap="medium")
+    with left:
+        if selected.empty:
+            st.info("Ningún símbolo cumplió el gap y el giro en este corte.")
+        for row in selected.itertuples():
+            cells = st.columns([1.5, .7, .5], vertical_alignment="center")
+            cells[0].write(f"**{row.ticker}** · {row.gap_direction}")
+            cells[0].caption(f"Giro {row.reversal_pct:+.3f}% · {row.juicio_visual}")
+            cells[1].write(f"{row.gap_at_open_pct:+.2f}%")
+            if cells[2].button("+", key=f"trial_b_{selected_day}_{seconds}_{row.ticker}",
+                               help=f"Mostrar u ocultar {row.ticker}"):
+                chosen = st.session_state.selected_charts
+                if row.ticker in chosen:
+                    chosen.remove(row.ticker)
+                elif len(chosen) < MAX_CHARTS:
+                    chosen.append(row.ticker)
+                else:
+                    st.toast(f"Máximo {MAX_CHARTS} gráficas simultáneas")
+    with right:
+        shown = [ticker for ticker in st.session_state.selected_charts
+                 if ticker in set(selected.ticker)]
+        if not shown:
+            st.caption("Selecciona + para abrir hasta cuatro gráficas.")
+        for ticker in shown:
+            row = result.loc[result.ticker.eq(ticker)].iloc[0]
+            prior = candles.loc[candles.ticker.eq(ticker) &
+                                candles.session.eq("PREVIA")].sort_values("bar_index")
+            upper, lower = (_provisional_bands(prior, float(row.price_at_cutoff))
+                            if len(prior) >= 19 else (float("nan"), float("nan")))
+            figure = build_daily_chart(
+                candles, ticker, float(row.gap_at_open_pct), -1, float("nan"),
+                "UPPER" if row.gap_direction == "UP" else "LOWER",
+                cutoff_seconds=seconds, cutoff_price=float(row.price_at_cutoff),
+                cutoff_upper=upper, cutoff_lower=lower, focus_opening=True)
+            st.plotly_chart(figure, width="stretch", config={"displayModeBar": False})
+
+
 @st.cache_data(ttl=60)
 def review_history() -> tuple[pd.DataFrame, pd.DataFrame]:
     return export_history(HISTORY_SESSION_LIMIT)
@@ -1364,7 +1519,7 @@ def manual_review_panel() -> None:
     if setups.empty:
         st.info("No hay sesiones históricas locales. Descárgalas desde Historial.")
         return
-    source = st.radio("Revisar casos de", ("Historial prueba", "Auditoría IA",
+    source = st.radio("Revisar casos de", ("Historial prueba A", "Auditoría IA",
                                           "Historial actual"),
                       horizontal=True)
     trial_mode = source != "Historial actual"
@@ -1378,16 +1533,23 @@ def manual_review_panel() -> None:
                    "cutoff_model_history_20s_*.csv")
         files = sorted((DATA_DIR / "snapshots").glob(pattern))
         if not files:
-            st.info("Primero genera el estudio en Historial prueba.")
+            st.info("Primero genera el estudio en Historial prueba A.")
             return
         trial_history = pd.read_csv(files[-1])
+        if not ai_mode:
+            trial_history = add_low_volatility(
+                trial_history, setups,
+                max_width_pct=st.session_state.get("trial_a_max_width", 1.5),
+                relative_quantile=st.session_state.get(
+                    "trial_a_relative_percentile", 25) / 100)
         setups = trial_review_cases(setups, trial_history, model_20s=not ai_mode)
         st.caption(("Se muestran los scores IA de todo el universo. La muestra "
                     "equilibrada invita a etiquetar casos altos, medios y bajos "
                     "que estaban fuera de la banda previa. " if ai_mode else
                     "Se muestran las puntuaciones del modelo de 20 segundos de "
-                    "Historial prueba. Etiqueta también casos con índice alto que "
-                    "visualmente hayan fallado. ") +
+                    "Historial prueba A. Las señales válidas incluyen el filtro "
+                    "de baja volatilidad; el grupo de score alto también muestra "
+                    "casos excluidos por ese filtro para que puedas etiquetarlos. ") +
                    f"El score procede del corte real de {review_cutoff_seconds} s; la gráfica completa "
                    "sirve para juzgar el resultado. Marca también «Mala» cuando una "
                    "selección de prueba no cumplió lo que buscabas. "
@@ -1395,7 +1557,7 @@ def manual_review_panel() -> None:
                    f"{trial_history.session_date.max()}.")
     dates = sorted(setups.session_date.unique(), reverse=True)[:HISTORY_SESSION_LIMIT]
     if not dates:
-        st.info("No hay sesiones de Historial prueba que coincidan con las velas locales.")
+        st.info("No hay sesiones de Historial prueba A que coincidan con las velas locales.")
         return
     setups = setups.loc[setups.session_date.isin(dates)].copy()
     reviews = load_reviews()
@@ -1632,7 +1794,8 @@ def main() -> None:
     style()
     st.sidebar.markdown("## Efecto Imán")
     page = st.sidebar.radio("NAVEGACIÓN", ("Home", "Operativa diaria", "Historial",
-                                            "Historial prueba", "Revisión manual"),
+                                            "Historial prueba A", "Historial prueba B",
+                                            "Revisión manual"),
                             label_visibility="collapsed")
     st.sidebar.caption("Gaps alcistas y bajistas · reversión hacia Bollinger")
     st.sidebar.caption("Análisis local · Sin ejecución de órdenes")
@@ -1645,8 +1808,10 @@ def main() -> None:
         daily_panel()
     elif page == "Historial":
         historical_panel()
-    elif page == "Historial prueba":
+    elif page == "Historial prueba A":
         trial_history_panel()
+    elif page == "Historial prueba B":
+        trial_history_b_panel()
     else:
         manual_review_panel()
 

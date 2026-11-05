@@ -47,7 +47,7 @@ def build_daily_chart(candles: pd.DataFrame, ticker: str, gap_pct: float,
         opening_price = float(series.iloc[-1].close) * (1 + gap_pct / 100)
         figure.add_annotation(x=first_index, y=opening_price, text=f"Gap {gap_pct:+.2f}%",
                               showarrow=True, arrowhead=2, ay=-35, bgcolor="#f7f7f7")
-    if cutoff_seconds in (20, 30, 60, 90) and pd.notna(cutoff_price):
+    if cutoff_seconds in (10, 20, 30, 60, 90) and pd.notna(cutoff_price):
         label = {60: "1 min", 90: "1.5 min"}.get(cutoff_seconds,
                                                    f"{cutoff_seconds} s")
         cutoff_x = first_index - .43 if not current.empty else first_index
@@ -101,7 +101,7 @@ def build_daily_chart(candles: pd.DataFrame, ticker: str, gap_pct: float,
     ticks = series.iloc[sorted(tick_indexes)]
     figure.update_layout(
         title=dict(text=f"{ticker}  /  15 MIN  /  {target_band}" +
-                   (f"  /  CORTE {cutoff_seconds} S" if cutoff_seconds in (20, 30, 60, 90) else ""),
+                   (f"  /  CORTE {cutoff_seconds} S" if cutoff_seconds in (10, 20, 30, 60, 90) else ""),
                    font=dict(family="Georgia, serif", size=17)),
         height=355, margin=dict(l=12, r=12, t=52, b=20),
         paper_bgcolor="#f7f7f7", plot_bgcolor="#f7f7f7", font=dict(color="#333333", size=11),

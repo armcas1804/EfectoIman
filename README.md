@@ -611,3 +611,31 @@ al azar; algunas fechas se habían examinado antes y el tiempo de la operación
 histórica SIP no representa la latencia real de recepción. Por ello, el
 modelo sigue siendo experimental y no reemplaza el score operativo de
 **Operativa diaria** o **Historial**.
+
+### Historial prueba A y B
+
+**A** conserva el score experimental de 20 segundos. Añade una condición
+explícita de baja volatilidad *antes* de la apertura: `ancho_previo_pct =
+(BB_superior_previa - BB_inferior_previa) / BB_media_previa × 100`.
+La lista exige que ese ancho no supere un máximo absoluto configurable
+(1,5 % inicialmente) ni el percentil bajo configurable (25 inicialmente) de
+las 20 sesiones anteriores del mismo símbolo. Con menos de 10 sesiones
+anteriores se usa sólo el máximo absoluto. El cálculo usa `shift(1)` para no
+incluir la fecha evaluada en su referencia. Estos límites son exploratorios;
+el score del modelo no se reentrena y las cifras de la evaluación anterior
+no incluyen este nuevo filtro. El ancho de bandas es una medida habitual de
+volatilidad, y su valor bajo debe interpretarse respecto a la historia del
+símbolo ([Fidelity](https://www.fidelity.com/learning-center/trading-investing/technical-analysis/technical-indicator-guide/bollinger-band-width),
+[StockCharts](https://chartschool.stockcharts.com/table-of-contents/technical-indicators-and-overlays/technical-indicators/bollinger-bandwidth)).
+
+**B** sólo exige dos cosas: un gap inicial de magnitud mínima configurable
+(1 % inicialmente) y un movimiento posterior hacia el cierre previo.
+`gap_inicial_pct = (primera_operación / cierre_previo - 1) × 100`.
+Para gap alcista, `giro_pct = (primera_operación - precio_al_corte) /
+primera_operación × 100`; para gap bajista se invierte el signo. Es candidato
+si `giro_pct > 0`. El corte puede ser de 10, 20 o 30 segundos; el precio es
+la última operación disponible hasta ese instante. No se usa un score para
+seleccionar. Los datos históricos de operaciones permiten repetir la regla,
+pero sus marcas de tiempo no prueban cuándo una cotización habría llegado
+en vivo. Las velas posteriores y Bollinger de la gráfica sólo sirven para
+revisión visual. La tabla B se puede exportar a CSV.
