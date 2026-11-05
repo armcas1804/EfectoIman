@@ -16,6 +16,7 @@ from daily_store import save_daily_session
 from opening_scan import opening_setups
 from real_data import download_bars, session_candles
 from signal_audit import record_availability
+from trial_variants import live_quote_observations
 
 
 NEW_YORK = ZoneInfo("America/New_York")
@@ -344,6 +345,17 @@ class OpeningCapture:
                                     opening_events=opening_events)
             folder = DATA_DIR / "snapshots"
             folder.mkdir(parents=True, exist_ok=True)
+            observations = live_quote_observations(pd.DataFrame.from_records([
+                {"ticker": quote.ticker, "price": quote.price,
+                 "quote_event_time": quote.event_time.isoformat(),
+                 "quote_received_at": quote.received_at.isoformat()}
+                for quote in events]), self.opened_at, seconds)
+            try:
+                observations.to_csv(
+                    folder / f"home_prueba_b_datos_{seconds}s_{self.day.isoformat()}.csv",
+                    index=False)
+            except OSError:
+                pass  # La vista B puede reconstruir el corte desde el flujo en memoria.
             prefix = f"{seconds}s_{self.day.isoformat()}"
             quotes_path = folder / f"apertura_{prefix}.csv"
             with quotes_path.open("w", newline="", encoding="utf-8") as file:
@@ -436,6 +448,18 @@ class OpeningCapture:
         with self._lock:
             return (self._window_setups.get(seconds), self._prior_candles,
                     self._window_ready_at.get(seconds))
+
+    def observations_at(self, seconds: int) -> pd.DataFrame:
+        """Datos de giro disponibles hasta el corte, incluso antes de guardar el flujo."""
+        with self._lock:
+            events = [quote for quote in self._quote_events
+                      if quote.received_at <= self.opened_at + timedelta(seconds=seconds)]
+        quotes = pd.DataFrame.from_records([
+            {"ticker": quote.ticker, "price": quote.price,
+             "quote_event_time": quote.event_time.isoformat(),
+             "quote_received_at": quote.received_at.isoformat()}
+            for quote in events])
+        return live_quote_observations(quotes, self.opened_at, seconds)
 
     def progress(self) -> CaptureProgress:
         """Estado real de preparación, recepción y cálculo para la pantalla."""

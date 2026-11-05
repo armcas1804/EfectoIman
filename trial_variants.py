@@ -2,6 +2,63 @@
 
 import numpy as np
 import pandas as pd
+from datetime import datetime, time, timedelta
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+
+LIVE_COLUMNS = ("ticker", "window_seconds", "source", "first_price", "price",
+                "first_time", "last_time", "event_count")
+
+
+def live_quote_observations(quotes: pd.DataFrame, opened_at: datetime,
+                            seconds: int) -> pd.DataFrame:
+    """Primera y última cotización ya recibidas para un corte de apertura."""
+    needed = {"ticker", "price", "quote_event_time", "quote_received_at"}
+    if quotes.empty or not needed.issubset(quotes.columns):
+        return pd.DataFrame(columns=LIVE_COLUMNS)
+    rows = quotes.copy()
+    rows["received"] = pd.to_datetime(rows.quote_received_at, utc=True,
+                                       errors="coerce").dt.tz_convert("America/New_York")
+    rows["event"] = pd.to_datetime(rows.quote_event_time, utc=True,
+                                    errors="coerce").dt.tz_convert("America/New_York")
+    rows["price"] = pd.to_numeric(rows.price, errors="coerce")
+    opened = pd.Timestamp(opened_at).tz_convert("America/New_York")
+    deadline = opened + timedelta(seconds=seconds)
+    rows = rows.loc[rows.received.between(opened, deadline) &
+                    rows.event.ge(opened) & rows.price.gt(0)].copy()
+    if rows.empty:
+        return pd.DataFrame(columns=LIVE_COLUMNS)
+    records = []
+    for ticker, group in rows.groupby("ticker", sort=True):
+        first = group.sort_values(["received", "event"]).iloc[0]
+        last = group.sort_values(["event", "received"]).iloc[-1]
+        records.append({
+            "ticker": ticker, "window_seconds": seconds,
+            "source": "yahoo_websocket_local", "first_price": float(first.price),
+            "price": float(last.price), "first_time": first.event.isoformat(),
+            "last_time": last.event.isoformat(), "event_count": len(group),
+        })
+    return pd.DataFrame.from_records(records, columns=LIVE_COLUMNS)
+
+
+def read_live_cut_observations(day: str, seconds: int,
+                               snapshot_dir: Path) -> pd.DataFrame:
+    """Recupera un corte ya congelado; filtra el flujo por hora de recepción."""
+    saved = snapshot_dir / f"home_prueba_b_datos_{seconds}s_{day}.csv"
+    if saved.is_file():
+        rows = pd.read_csv(saved)
+        if set(LIVE_COLUMNS).issubset(rows.columns):
+            return rows.loc[rows.window_seconds.eq(seconds), list(LIVE_COLUMNS)]
+    opened = datetime.combine(datetime.fromisoformat(day).date(), time(9, 30),
+                              ZoneInfo("America/New_York"))
+    for available_seconds in (30, 60, 90):
+        if available_seconds < seconds:
+            continue
+        flow = snapshot_dir / f"apertura_flujo_{available_seconds}s_{day}.csv"
+        if flow.is_file():
+            return live_quote_observations(pd.read_csv(flow), opened, seconds)
+    return pd.DataFrame(columns=LIVE_COLUMNS)
 
 
 def add_low_volatility(model_history: pd.DataFrame, setups_history: pd.DataFrame,

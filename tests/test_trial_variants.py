@@ -1,11 +1,36 @@
 import unittest
+from datetime import datetime, timedelta
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from trial_variants import add_low_volatility, opening_reversal_table
+from trial_variants import (add_low_volatility, live_quote_observations,
+                            opening_reversal_table, read_live_cut_observations)
 
 
 class TrialVariantsTests(unittest.TestCase):
+    def test_live_cuts_ignore_quotes_received_after_each_deadline(self):
+        opened = datetime(2026, 10, 22, 9, 30,
+                          tzinfo=ZoneInfo("America/New_York"))
+        quotes = pd.DataFrame([{
+            "ticker": "AAA", "price": price,
+            "quote_event_time": (opened + timedelta(seconds=second)).isoformat(),
+            "quote_received_at": (opened + timedelta(seconds=second)).isoformat(),
+        } for second, price in ((2, 102.0), (25, 101.5), (45, 100.5))])
+        thirty = live_quote_observations(quotes, opened, 30)
+        sixty = live_quote_observations(quotes, opened, 60)
+        self.assertEqual(thirty.price.tolist(), [101.5])
+        self.assertEqual(sixty.price.tolist(), [100.5])
+        setups = pd.DataFrame([{"ticker": "AAA", "prior_close": 100.0}])
+        self.assertTrue(opening_reversal_table(setups, thirty, 30).candidate.iloc[0])
+        with TemporaryDirectory() as folder:
+            quotes.to_csv(Path(folder) / "apertura_flujo_60s_2026-10-22.csv",
+                          index=False)
+            recovered = read_live_cut_observations("2026-10-22", 30, Path(folder))
+        self.assertEqual(recovered.price.tolist(), [101.5])
+
     def test_low_volatility_uses_only_earlier_sessions(self):
         days = pd.date_range("2026-08-01", periods=12).strftime("%Y-%m-%d")
         history = pd.DataFrame({"session_date": days, "ticker": "AAA",

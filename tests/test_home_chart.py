@@ -47,6 +47,13 @@ class HomeChartTests(unittest.TestCase):
         self.assertIn("Banda superior · BB(20,2)", traces)
         self.assertNotIn("Vela en formación", " ".join(traces))
 
+    def test_trial_chart_marks_first_quote_and_frozen_cutoff(self):
+        chart = build_home_chart(prior_candles(), "AAL", 30, 101.5,
+                                 102.0, 98.0, 2.0, first_price=102.0)
+        trace = next(item for item in chart.data
+                     if item.name == "Primera operación → corte")
+        self.assertEqual(list(trace.y), [102.0, 101.5])
+
 
 if __name__ == "__main__":
     unittest.main()

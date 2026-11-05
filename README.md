@@ -639,3 +639,18 @@ seleccionar. Los datos históricos de operaciones permiten repetir la regla,
 pero sus marcas de tiempo no prueban cuándo una cotización habría llegado
 en vivo. Las velas posteriores y Bollinger de la gráfica sólo sirven para
 revisión visual. La tabla B se puede exportar a CSV.
+
+**Home prueba** aplica esa misma regla B a los cortes locales de 30, 60 y 90
+segundos. El mismo capturador de Home prepara las velas previas a las 09:25 ET,
+recibe cotizaciones durante la apertura y guarda, para cada corte, la primera
+cotización recibida y la última disponible hasta el límite. Cada corte se
+guarda por separado en `data/snapshots/home_prueba_b_datos_*`; los archivos de
+flujo anteriores también se pueden reconstruir filtrando por hora de
+recepción. La página sigue automáticamente el último corte disponible, permite
+volver a otro anterior y muestra el primer precio, el precio congelado y el
+giro en la gráfica de 15 minutos. La lista B usa sólo gap y giro; las Bandas
+de Bollinger se muestran como contexto visual. El primer precio recibido por
+Yahoo puede llegar después de la primera operación de bolsa; la hora de cada
+cotización aparece en el diagnóstico. La computadora o instancia que captura
+debe seguir activa durante la apertura; Streamlit Community Cloud no comparte
+los archivos locales de `data/`.

@@ -149,11 +149,18 @@ class OpeningLiveTests(unittest.TestCase):
             thirty_quotes = pd.read_csv(folder_path / "apertura_30s_2026-10-09.csv")
             sixty_quotes = pd.read_csv(folder_path / "apertura_60s_2026-10-09.csv")
             ninety_quotes = pd.read_csv(folder_path / "apertura_90s_2026-10-09.csv")
+            thirty_reversal = pd.read_csv(
+                folder_path / "home_prueba_b_datos_30s_2026-10-09.csv")
+            ninety_reversal = pd.read_csv(
+                folder_path / "home_prueba_b_datos_90s_2026-10-09.csv")
             thirty_candidates = pd.read_csv(
                 folder_path / "candidatos_apertura_30s_2026-10-09.csv")
         self.assertEqual(thirty_quotes.iloc[0].price_at_cutoff, 103)
         self.assertEqual(sixty_quotes.iloc[0].price_at_cutoff, 105)
         self.assertEqual(ninety_quotes.iloc[0].price_at_cutoff, 106)
+        self.assertEqual(thirty_reversal.iloc[0].first_price, 102)
+        self.assertEqual(thirty_reversal.iloc[0].price, 103)
+        self.assertEqual(ninety_reversal.iloc[0].price, 106)
         self.assertEqual(thirty.iloc[0].opening_price, 103)
         self.assertEqual(sixty.iloc[0].opening_price, 105)
         self.assertEqual(ninety.iloc[0].opening_price, 106)

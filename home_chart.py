@@ -54,7 +54,8 @@ def provisional_15m_bar(candles: pd.DataFrame, ticker: str,
 def build_home_chart(candles: pd.DataFrame, ticker: str, cutoff_seconds: int,
                      cutoff_price: float, cutoff_upper: float, cutoff_lower: float,
                      gap_pct: float, minute_bars: pd.DataFrame | None = None,
-                     now: datetime | None = None) -> go.Figure:
+                     now: datetime | None = None,
+                     first_price: float | None = None) -> go.Figure:
     """No dibuja una vela de 15m hasta que exista su OHLC completo."""
     rows = candles.loc[candles.ticker == ticker].sort_values("bar_index").copy()
     figure = go.Figure()
@@ -110,6 +111,14 @@ def build_home_chart(candles: pd.DataFrame, ticker: str, cutoff_seconds: int,
     # Los tres valores pertenecen al corte elegido. Un punto evita inventar
     # el máximo, mínimo y cierre definitivo de una vela todavía abierta.
     cutoff_x = opening_index - 0.22
+    if first_price is not None and math.isfinite(first_price):
+        figure.add_trace(go.Scatter(
+            x=[opening_index - 0.40, cutoff_x], y=[first_price, cutoff_price],
+            mode="lines+markers", name="Primera operación → corte",
+            line=dict(color="#f3cc70", width=2),
+            marker=dict(size=[8, 11], symbol=["circle", "diamond"]),
+            hovertext=["Primera operación", f"Corte {cutoff_seconds} s"],
+            hovertemplate="%{hovertext}: %{y:.3f}<extra></extra>"))
     prior = series.loc[series.session == "PREVIA"]
     if not prior.empty:
         last = prior.iloc[-1]
