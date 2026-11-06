@@ -10,6 +10,15 @@ from zoneinfo import ZoneInfo
 LIVE_COLUMNS = ("ticker", "window_seconds", "source", "first_price", "price",
                 "first_time", "last_time", "event_count")
 
+# Puntos experimentales del score de Home prueba B. No alteran la selección B.
+HOME_B_MAX_PRIOR_WIDTH_PCT = 1.5
+HOME_B_PRIOR_WIDTH_POINTS_PER_PP = 20.0
+HOME_B_PRIOR_WIDTH_MAX_PENALTY = 30.0
+HOME_B_PRIOR_GROWTH_POINTS_PER_PP = 100.0
+HOME_B_PRIOR_GROWTH_MAX_PENALTY = 20.0
+HOME_B_LIVE_EXPANSION_POINTS_PER_PCT = 0.5
+HOME_B_LIVE_EXPANSION_MAX_PENALTY = 50.0
+
 
 def live_quote_observations(quotes: pd.DataFrame, opened_at: datetime,
                             seconds: int) -> pd.DataFrame:
@@ -139,3 +148,44 @@ def opening_reversal_table(setups: pd.DataFrame, observations: pd.DataFrame,
         ascending=[False, False, False], key=lambda column: (
             column.abs() if column.name == "gap_at_open_pct" else column),
         na_position="last").reset_index(drop=True)
+
+
+def score_home_trial_b(setups: pd.DataFrame, reversals: pd.DataFrame) -> pd.DataFrame:
+    """Resta puntos por ancho previo, crecimiento previo y expansión al corte.
+
+    El ancho provisional usa BB(20,2) de 15 minutos calculada por el scanner
+    sólo con el precio disponible en el corte. Sin bandas válidas no hay score.
+    """
+    columns = ["ticker", "prior_bb_width_pct", "prior_bb_width_change",
+               "cutoff_bb_upper", "cutoff_bb_lower"]
+    bands = setups.reindex(columns=columns).drop_duplicates("ticker")
+    result = reversals.drop(columns=[column for column in columns[1:]
+                                     if column in reversals.columns]).merge(
+        bands, on="ticker", how="left", validate="one_to_one")
+    prior = pd.to_numeric(result.prior_bb_width_pct, errors="coerce")
+    growth = pd.to_numeric(result.prior_bb_width_change, errors="coerce")
+    upper = pd.to_numeric(result.cutoff_bb_upper, errors="coerce")
+    lower = pd.to_numeric(result.cutoff_bb_lower, errors="coerce")
+    middle = (upper + lower) / 2
+    current_width = (upper - lower) / middle * 100
+    expansion = (current_width / prior - 1) * 100
+    result["cutoff_bb_width_pct"] = current_width
+    result["bb_width_expansion_pct"] = expansion
+    result["penalty_prior_width"] = (
+        (prior - HOME_B_MAX_PRIOR_WIDTH_PCT).clip(lower=0)
+        * HOME_B_PRIOR_WIDTH_POINTS_PER_PP).clip(upper=HOME_B_PRIOR_WIDTH_MAX_PENALTY)
+    result["penalty_prior_growth"] = (
+        growth.clip(lower=0) * HOME_B_PRIOR_GROWTH_POINTS_PER_PP
+    ).clip(upper=HOME_B_PRIOR_GROWTH_MAX_PENALTY)
+    result["penalty_live_expansion"] = (
+        expansion.clip(lower=0) * HOME_B_LIVE_EXPANSION_POINTS_PER_PCT
+    ).clip(upper=HOME_B_LIVE_EXPANSION_MAX_PENALTY)
+    valid_bands = (prior.gt(0) & growth.notna() & upper.gt(lower) &
+                   middle.gt(0) & np.isfinite(current_width) &
+                   np.isfinite(expansion))
+    total_penalty = result[["penalty_prior_width", "penalty_prior_growth",
+                            "penalty_live_expansion"]].sum(axis=1)
+    result["score_home_b"] = np.where(
+        result.candidate & valid_bands,
+        (100 - total_penalty).clip(lower=0).round(1), np.nan)
+    return result

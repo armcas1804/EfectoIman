@@ -649,7 +649,14 @@ flujo anteriores también se pueden reconstruir filtrando por hora de
 recepción. La página sigue automáticamente el último corte disponible, permite
 volver a otro anterior y muestra el primer precio, el precio congelado y el
 giro en la gráfica de 15 minutos. La lista B usa sólo gap y giro; las Bandas
-de Bollinger se muestran como contexto visual. El primer precio recibido por
+de Bollinger no bloquean la selección. **Home prueba** ordena esos candidatos
+con un score experimental de 0 a 100: parte de 100 y descuenta hasta 30 puntos
+si el ancho BB previo supera 1.5%, hasta 20 por crecimiento del ancho en las
+últimas cinco velas previas y hasta 50 por expansión del ancho BB provisional
+respecto al previo. Un ancho que se mantiene o se cierra no recibe ese último
+descuento. Sin bandas válidas el score queda vacío, no se inventa. La tabla y
+el CSV muestran las métricas y los tres descuentos. Historial prueba B mantiene
+su regla binaria original. El primer precio recibido por
 Yahoo puede llegar después de la primera operación de bolsa; la hora de cada
 cotización aparece en el diagnóstico. La computadora o instancia que captura
 debe seguir activa durante la apertura; Streamlit Community Cloud no comparte

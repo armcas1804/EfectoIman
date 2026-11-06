@@ -30,7 +30,7 @@ from signal_audit import first_availability
 from scanner_settings import DEFAULT_THRESHOLDS
 from subminute_history import ten_second_coverage
 from trial_variants import (add_low_volatility, opening_reversal_table,
-                            read_live_cut_observations)
+                            read_live_cut_observations, score_home_trial_b)
 
 
 NY = ZoneInfo("America/New_York")
@@ -776,8 +776,11 @@ def home_trial_panel() -> None:
                "Viendo un corte anterior. Elige el más reciente para retomar "
                "el avance automático.")
     setups, frozen_candles, ready_at, observations = windows[seconds]
-    result = opening_reversal_table(setups, observations, seconds, min_gap)
-    candidates = result.loc[result.candidate]
+    result = score_home_trial_b(
+        setups, opening_reversal_table(setups, observations, seconds, min_gap))
+    candidates = result.loc[result.candidate].sort_values(
+        ["score_home_b", "reversal_pct", "ticker"],
+        ascending=[False, False, True], na_position="last")
     cut_clock = {30: "09:30:30", 60: "09:31:00", 90: "09:31:30"}[seconds]
     st.markdown(f"### Lista B de {labels[seconds]}")
     st.caption(f"{day} · corte {cut_clock} ET · "
@@ -788,19 +791,38 @@ def home_trial_panel() -> None:
     st.caption("Gap = (primera cotización / cierre previo − 1) × 100. "
                "Para gap alcista, giro = (primera cotización − precio al corte) "
                "/ primera cotización × 100; para gap bajista se invierte el signo. "
-               "Se exige gap mínimo y giro positivo. No se usa score ni "
-               "Bollinger para seleccionar.")
+               "Se exige gap mínimo y giro positivo. El score ordena las señales; "
+               "Bollinger no bloquea la selección.")
+    st.caption("Score B = 100 menos tres descuentos: ancho previo de BB(20,2) "
+               "superior a 1.5% (20 puntos por punto porcentual; máximo 30), "
+               "crecimiento positivo del ancho en las últimas cinco velas "
+               "previas (100 puntos por punto porcentual por vela; máximo 20) "
+               "y expansión del ancho provisional respecto al cierre previo "
+               "(0.5 puntos por cada 1% de expansión; máximo 50). "
+               "Si las bandas se cierran, ese cambio no descuenta puntos. "
+               "Sin bandas válidas no se asigna score.")
     if candidates.empty:
         st.info("Ningún símbolo cumplió ambas condiciones en este corte.")
     else:
         st.dataframe(candidates.reindex(columns=[
-            "ticker", "gap_at_open_pct", "gap_direction", "reversal_pct",
+            "ticker", "score_home_b", "gap_at_open_pct", "gap_direction",
+            "reversal_pct", "prior_bb_width_pct", "prior_bb_width_change",
+            "cutoff_bb_width_pct", "bb_width_expansion_pct",
             "first_price", "price_at_cutoff", "first_time", "last_time"]),
             hide_index=True, width="stretch", column_config={
                 "ticker": "Empresa",
+                "score_home_b": st.column_config.NumberColumn("Score B", format="%.1f"),
                 "gap_at_open_pct": st.column_config.NumberColumn("Gap inicial %", format="%+.2f"),
                 "gap_direction": "Dirección",
                 "reversal_pct": st.column_config.NumberColumn("Giro %", format="%+.3f"),
+                "prior_bb_width_pct": st.column_config.NumberColumn(
+                    "Ancho BB previo %", format="%.2f"),
+                "prior_bb_width_change": st.column_config.NumberColumn(
+                    "Cambio ancho previo", format="%+.3f"),
+                "cutoff_bb_width_pct": st.column_config.NumberColumn(
+                    "Ancho BB al corte %", format="%.2f"),
+                "bb_width_expansion_pct": st.column_config.NumberColumn(
+                    "Expansión BB %", format="%+.1f"),
                 "first_price": st.column_config.NumberColumn("Primer precio", format="%.3f"),
                 "price_at_cutoff": st.column_config.NumberColumn(
                     "Precio al corte", format="%.3f"),
@@ -820,10 +842,12 @@ def home_trial_panel() -> None:
         return
     row = candidates.loc[candidates.ticker.eq(selected)].iloc[0]
     setup = setups.loc[setups.ticker.eq(selected)].iloc[0]
-    values = st.columns(3)
-    values[0].metric("Primer precio", f"{row.first_price:.3f}")
-    values[1].metric(f"Precio · {cut_clock} ET", f"{row.price_at_cutoff:.3f}")
-    values[2].metric("Giro hacia el cierre", f"{row.reversal_pct:+.3f}%")
+    values = st.columns(4)
+    values[0].metric("Score B", f"{row.score_home_b:.1f}" if pd.notna(row.score_home_b)
+                     else "Sin datos BB")
+    values[1].metric("Primer precio", f"{row.first_price:.3f}")
+    values[2].metric(f"Precio · {cut_clock} ET", f"{row.price_at_cutoff:.3f}")
+    values[3].metric("Giro hacia el cierre", f"{row.reversal_pct:+.3f}%")
     refresher = market_refresh(day, 2)
     market_window = (now.weekday() < 5 and (9, 31) <= (now.hour, now.minute) <= (16, 15))
     if market_window:

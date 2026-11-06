@@ -7,7 +7,8 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from trial_variants import (add_low_volatility, live_quote_observations,
-                            opening_reversal_table, read_live_cut_observations)
+                            opening_reversal_table, read_live_cut_observations,
+                            score_home_trial_b)
 
 
 class TrialVariantsTests(unittest.TestCase):
@@ -68,6 +69,32 @@ class TrialVariantsTests(unittest.TestCase):
         self.assertGreater(by_ticker.loc["UP", "reversal_pct"], 0)
         self.assertGreater(by_ticker.loc["DOWN", "reversal_pct"], 0)
         self.assertEqual(set(result.ticker.tolist()[:2]), {"UP", "DOWN"})
+
+    def test_home_b_score_rewards_low_stable_width_and_penalizes_expansion(self):
+        setups = pd.DataFrame([
+            {"ticker": "FLAT", "prior_close": 100.0,
+             "prior_bb_width_pct": 1.0, "prior_bb_width_change": -0.02,
+             "cutoff_bb_upper": 100.5, "cutoff_bb_lower": 99.5},
+            {"ticker": "WIDE", "prior_close": 100.0,
+             "prior_bb_width_pct": 3.0, "prior_bb_width_change": 0.10,
+             "cutoff_bb_upper": 102.4, "cutoff_bb_lower": 97.6},
+            {"ticker": "MISSING", "prior_close": 100.0},
+        ])
+        observations = pd.DataFrame([
+            {"ticker": ticker, "window_seconds": 30, "first_price": 102.0,
+             "price": 101.0, "source": "test", "first_time": "09:30:01",
+             "last_time": "09:30:29", "event_count": 2}
+            for ticker in setups.ticker
+        ])
+        result = score_home_trial_b(
+            setups, opening_reversal_table(setups, observations, 30))
+        by_ticker = result.set_index("ticker")
+        self.assertEqual(by_ticker.loc["FLAT", "score_home_b"], 100.0)
+        self.assertEqual(by_ticker.loc["WIDE", "score_home_b"], 30.0)
+        self.assertEqual(by_ticker.loc["WIDE", "penalty_prior_width"], 30.0)
+        self.assertEqual(by_ticker.loc["WIDE", "penalty_prior_growth"], 10.0)
+        self.assertAlmostEqual(by_ticker.loc["WIDE", "penalty_live_expansion"], 30.0)
+        self.assertTrue(pd.isna(by_ticker.loc["MISSING", "score_home_b"]))
 
 
 if __name__ == "__main__":
