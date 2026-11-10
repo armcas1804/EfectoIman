@@ -640,7 +640,7 @@ pero sus marcas de tiempo no prueban cuándo una cotización habría llegado
 en vivo. Las velas posteriores y Bollinger de la gráfica sólo sirven para
 revisión visual. La tabla B se puede exportar a CSV.
 
-**Home prueba** aplica esa misma regla B a los cortes locales de 30, 60 y 90
+**Home prueba** aplica la regla B a los cortes locales de 10, 30, 60 y 90
 segundos. El mismo capturador de Home prepara las velas previas a las 09:25 ET,
 recibe cotizaciones durante la apertura y guarda, para cada corte, la primera
 cotización recibida y la última disponible hasta el límite. Cada corte se
@@ -648,15 +648,25 @@ guarda por separado en `data/snapshots/home_prueba_b_datos_*`; los archivos de
 flujo anteriores también se pueden reconstruir filtrando por hora de
 recepción. La página sigue automáticamente el último corte disponible, permite
 volver a otro anterior y muestra el primer precio, el precio congelado y el
-giro en la gráfica de 15 minutos. La lista B usa sólo gap y giro; las Bandas
-de Bollinger no bloquean la selección. **Home prueba** ordena esos candidatos
-con un score experimental de 0 a 100: parte de 100 y descuenta hasta 30 puntos
-si el ancho BB previo supera 1.5%, hasta 20 por crecimiento del ancho en las
-últimas cinco velas previas y hasta 50 por expansión del ancho BB provisional
-respecto al previo. Un ancho que se mantiene o se cierra no recibe ese último
-descuento. Sin bandas válidas el score queda vacío, no se inventa. La tabla y
-el CSV muestran las métricas y los tres descuentos. Historial prueba B mantiene
-su regla binaria original. El primer precio recibido por
+giro en la gráfica de 15 minutos. La lista de Home prueba exige gap, giro y
+precio fuera de BB(20,2) al primer precio y al corte. Para gap alcista, las
+distancias son `(primero / banda_superior_previa - 1) * 100` y
+`(precio_corte / banda_superior_provisional - 1) * 100`; para gap bajista se
+usa la banda inferior y la razón inversa. Las dos distancias deben ser
+positivas. Se conserva el umbral de gap configurado.
+
+El score experimental parte de 100 y resta hasta 10 puntos si el gap es menor
+a 2%, hasta 30 si la distancia al corte es menor a 1%, hasta 20 por pendiente
+absoluta de la banda objetivo
+en las últimas cinco velas previas, hasta 20 por movimiento absoluto real de
+la banda dentro del corte, hasta 15 por ancho previo superior a 1.5%, hasta 5
+por crecimiento previo del ancho y hasta 10 por expansión del ancho
+provisional. El movimiento real deshace la normalización del ángulo a cinco
+minutos: `tan(angle_deg) * segundos_entre_cotizaciones / 300`. Así se
+penalizan ambas inclinaciones sin tratar una oscilación de un segundo como
+cinco minutos completos. Sin bandas o movimiento medible el score queda vacío.
+La tabla y el CSV muestran distancias, lateralidad y descuentos. Historial
+prueba B mantiene su regla binaria original. El primer precio recibido por
 Yahoo puede llegar después de la primera operación de bolsa; la hora de cada
 cotización aparece en el diagnóstico. La computadora o instancia que captura
 debe seguir activa durante la apertura; Streamlit Community Cloud no comparte

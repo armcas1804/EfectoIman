@@ -21,7 +21,8 @@ from daily_store import (export_history, initialize_daily_store,
                          load_daily_session, save_daily_session, session_dates)
 from outcomes import build_outcomes
 from opening_scan import _provisional_bands
-from opening_live import CaptureProgress, DISPLAY_WINDOWS, OpeningCapture, next_capture_day
+from opening_live import (CAPTURE_SECONDS, CaptureProgress, DISPLAY_WINDOWS,
+                          OpeningCapture, next_capture_day)
 from market_refresh import MarketRefresh
 from manual_review import (LABELS, build_early_chart, early_features,
                            early_trajectory,
@@ -36,7 +37,7 @@ from trial_variants import (add_low_volatility, opening_reversal_table,
 NY = ZoneInfo("America/New_York")
 HERMOSILLO = ZoneInfo("America/Hermosillo")
 MAX_CHARTS = 4
-CAPTURE_CACHE_VERSION = 8
+CAPTURE_CACHE_VERSION = 9
 OPENING_WINDOW_COLUMNS = ["ticker", "score_open", "gap_pct", "gap_direction",
                           "opening_price", "cutoff_bb_upper", "cutoff_bb_lower",
                           "distance_to_band_pct", "target_angle_cutoff_deg",
@@ -709,16 +710,21 @@ def home_trial_cut_changed() -> None:
 
 @st.fragment(run_every="10s")
 def home_trial_panel() -> None:
-    """Las mismas ventanas congeladas de Home, clasificadas con la regla B."""
+    """Cortes congelados de 10 a 90 s con la regla B y distancia a Bollinger."""
     now = datetime.now(NY)
     day = now.date().isoformat()
     capture = opening_capture(day, CAPTURE_CACHE_VERSION)
     capture.poll()
-    _, prior_candles, capture_status, _ = capture.snapshot()
+    cut_setups, prior_candles, capture_status, _ = capture.snapshot()
     snapshot_dir = DATA_DIR / "snapshots"
     windows = {}
-    for seconds in DISPLAY_WINDOWS:
-        setups, candles, ready_at = capture.snapshot_at(seconds)
+    trial_windows = (CAPTURE_SECONDS, *DISPLAY_WINDOWS)
+    for seconds in trial_windows:
+        if seconds == CAPTURE_SECONDS:
+            setups, candles, ready_at = (cut_setups, prior_candles,
+                                         capture.progress().ready_at)
+        else:
+            setups, candles, ready_at = capture.snapshot_at(seconds)
         if setups is None:
             path = snapshot_dir / f"diagnostico_apertura_{seconds}s_{day}.csv"
             if path.is_file():
@@ -729,23 +735,23 @@ def home_trial_panel() -> None:
         observations = read_live_cut_observations(day, seconds, snapshot_dir)
         if observations.empty:
             observations = capture.observations_at(seconds)
-        if not observations.empty:
-            windows[seconds] = (setups, candles, ready_at, observations)
+        windows[seconds] = (setups, candles, ready_at, observations)
 
     st.markdown("<span class='eyebrow'>Home prueba · regla B</span>"
                 "<div class='rule'></div>", unsafe_allow_html=True)
-    st.write("Gap inicial y giro hacia el cierre previo en las primeras "
-             "cotizaciones de la apertura.")
+    st.write("Gap inicial, giro hacia el cierre previo y precio fuera de "
+             "Bollinger durante la apertura.")
     st.caption("El capturador se prepara a las 09:25 de Nueva York. "
-               "Cada corte usa sólo cotizaciones recibidas hasta las 09:30:30, "
-               "09:31:00 o 09:31:30 ET. Las listas quedan congeladas y la "
+               "Cada corte usa sólo cotizaciones recibidas hasta las 09:30:10, "
+               "09:30:30, 09:31:00 o 09:31:30 ET. Las listas quedan congeladas y la "
                "gráfica puede incorporar velas posteriores.")
     min_gap = st.slider("Gap mínimo (%)", 0.0, 5.0,
                         float(DEFAULT_THRESHOLDS.minimum_gap_pct or 0.0),
                         step=0.25, key="home_trial_min_gap")
-    labels = {30: "30 segundos", 60: "1 minuto", 90: "1 minuto y medio"}
-    cut_cards = st.columns(3)
-    for seconds, card in zip(DISPLAY_WINDOWS, cut_cards):
+    labels = {10: "10 segundos", 30: "30 segundos",
+              60: "1 minuto", 90: "1 minuto y medio"}
+    cut_cards = st.columns(4)
+    for seconds, card in zip(trial_windows, cut_cards):
         deadline = capture.opened_at + timedelta(seconds=seconds)
         state = ("Disponible" if seconds in windows else
                  "Pendiente" if now < deadline else "Sin datos")
@@ -778,56 +784,56 @@ def home_trial_panel() -> None:
     setups, frozen_candles, ready_at, observations = windows[seconds]
     result = score_home_trial_b(
         setups, opening_reversal_table(setups, observations, seconds, min_gap))
-    candidates = result.loc[result.candidate].sort_values(
+    candidates = result.loc[result.home_b_candidate].sort_values(
         ["score_home_b", "reversal_pct", "ticker"],
         ascending=[False, False, True], na_position="last")
-    cut_clock = {30: "09:30:30", 60: "09:31:00", 90: "09:31:30"}[seconds]
+    cut_clock = {10: "09:30:10", 30: "09:30:30",
+                 60: "09:31:00", 90: "09:31:30"}[seconds]
     st.markdown(f"### Lista B de {labels[seconds]}")
     st.caption(f"{day} · corte {cut_clock} ET · "
                f"{int(result.price_at_cutoff.notna().sum())}/{len(setups)} "
                f"símbolos con datos · {len(candidates)} candidatos"
                + (f" · calculado {ready_at:%H:%M:%S} ET" if ready_at else
                   " · recuperado del archivo local"))
-    st.caption("Gap = (primera cotización / cierre previo − 1) × 100. "
-               "Para gap alcista, giro = (primera cotización − precio al corte) "
-               "/ primera cotización × 100; para gap bajista se invierte el signo. "
-               "Se exige gap mínimo y giro positivo. El score ordena las señales; "
-               "Bollinger no bloquea la selección.")
-    st.caption("Score B = 100 menos tres descuentos: ancho previo de BB(20,2) "
-               "superior a 1.5% (20 puntos por punto porcentual; máximo 30), "
-               "crecimiento positivo del ancho en las últimas cinco velas "
-               "previas (100 puntos por punto porcentual por vela; máximo 20) "
-               "y expansión del ancho provisional respecto al cierre previo "
-               "(0.5 puntos por cada 1% de expansión; máximo 50). "
-               "Si las bandas se cierran, ese cambio no descuenta puntos. "
-               "Sin bandas válidas no se asigna score.")
+    st.caption("Se exige gap mínimo, giro hacia el cierre previo y precio fuera "
+               "de Bollinger tanto en la primera cotización como al corte. "
+               "La distancia inicial usa la última BB(20,2) completa de 15 min; "
+               "la distancia al corte usa la banda provisional calculada con "
+               "precios recibidos hasta ese instante.")
+    st.caption("Score B experimental = 100 menos descuentos pequeños por gap "
+               "menor a 2% y mayores por distancia exterior menor a 1%, "
+               "pendiente previa de la banda objetivo, movimiento "
+               "real de esa banda dentro del corte, ancho previo alto y expansión "
+               "del ancho. La lateralidad se evalúa en ambas direcciones; "
+               "si faltan bandas o movimiento medible, no se inventa score.")
     if candidates.empty:
-        st.info("Ningún símbolo cumplió ambas condiciones en este corte.")
+        st.info("Ningún símbolo cumplió gap, giro y exterioridad en este corte.")
     else:
         st.dataframe(candidates.reindex(columns=[
             "ticker", "score_home_b", "gap_at_open_pct", "gap_direction",
-            "reversal_pct", "prior_bb_width_pct", "prior_bb_width_change",
-            "cutoff_bb_width_pct", "bb_width_expansion_pct",
-            "first_price", "price_at_cutoff", "first_time", "last_time"]),
+            "distance_first_outside_bb_pct", "distance_cut_outside_bb_pct",
+            "reversal_pct", "prior_target_band_slope_pct", "live_band_move_pct",
+            "prior_bb_width_pct", "cutoff_bb_width_pct", "bb_width_expansion_pct"]),
             hide_index=True, width="stretch", column_config={
                 "ticker": "Empresa",
                 "score_home_b": st.column_config.NumberColumn("Score B", format="%.1f"),
                 "gap_at_open_pct": st.column_config.NumberColumn("Gap inicial %", format="%+.2f"),
                 "gap_direction": "Dirección",
+                "distance_first_outside_bb_pct": st.column_config.NumberColumn(
+                    "Fuera BB inicial %", format="%+.2f"),
+                "distance_cut_outside_bb_pct": st.column_config.NumberColumn(
+                    "Fuera BB al corte %", format="%+.2f"),
                 "reversal_pct": st.column_config.NumberColumn("Giro %", format="%+.3f"),
+                "prior_target_band_slope_pct": st.column_config.NumberColumn(
+                    "Pendiente previa %", format="%+.3f"),
+                "live_band_move_pct": st.column_config.NumberColumn(
+                    "Cambio banda al corte %", format="%+.3f"),
                 "prior_bb_width_pct": st.column_config.NumberColumn(
                     "Ancho BB previo %", format="%.2f"),
-                "prior_bb_width_change": st.column_config.NumberColumn(
-                    "Cambio ancho previo", format="%+.3f"),
                 "cutoff_bb_width_pct": st.column_config.NumberColumn(
                     "Ancho BB al corte %", format="%.2f"),
                 "bb_width_expansion_pct": st.column_config.NumberColumn(
-                    "Expansión BB %", format="%+.1f"),
-                "first_price": st.column_config.NumberColumn("Primer precio", format="%.3f"),
-                "price_at_cutoff": st.column_config.NumberColumn(
-                    "Precio al corte", format="%.3f"),
-                "first_time": "Primera cotización ET",
-                "last_time": "Última cotización ET"})
+                    "Expansión BB %", format="%+.1f")})
     with st.expander(f"Ver diagnóstico completo ({len(result)} símbolos)"):
         st.dataframe(result, hide_index=True, width="stretch")
     st.download_button("Descargar corte B (CSV)", result.to_csv(index=False),
@@ -848,6 +854,9 @@ def home_trial_panel() -> None:
     values[1].metric("Primer precio", f"{row.first_price:.3f}")
     values[2].metric(f"Precio · {cut_clock} ET", f"{row.price_at_cutoff:.3f}")
     values[3].metric("Giro hacia el cierre", f"{row.reversal_pct:+.3f}%")
+    st.caption(f"Distancia fuera de BB: primera cotización "
+               f"{row.distance_first_outside_bb_pct:+.2f}% · "
+               f"corte {row.distance_cut_outside_bb_pct:+.2f}%")
     refresher = market_refresh(day, 2)
     market_window = (now.weekday() < 5 and (9, 31) <= (now.hour, now.minute) <= (16, 15))
     if market_window:

@@ -117,6 +117,13 @@ class OpeningLiveTests(unittest.TestCase):
             self.assertIn("1/1", status)
             self.assertTrue((Path(folder) / "snapshots" /
                              "apertura_10s_2026-10-09.csv").exists())
+            ten_observations = pd.read_csv(Path(folder) / "snapshots" /
+                                            "home_prueba_b_datos_10s_2026-10-09.csv")
+            ten_diagnostic = pd.read_csv(Path(folder) / "snapshots" /
+                                          "diagnostico_apertura_10s_2026-10-09.csv")
+            self.assertEqual(ten_observations.iloc[0].first_price, 102)
+            self.assertEqual(ten_observations.iloc[0].price, 103)
+            self.assertEqual(ten_diagnostic.iloc[0].opening_price, 103)
             save.assert_called_once()
             audit.assert_called_once()
             progress = capture.progress()

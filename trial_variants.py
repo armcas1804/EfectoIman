@@ -12,12 +12,16 @@ LIVE_COLUMNS = ("ticker", "window_seconds", "source", "first_price", "price",
 
 # Puntos experimentales del score de Home prueba B. No alteran la selección B.
 HOME_B_MAX_PRIOR_WIDTH_PCT = 1.5
-HOME_B_PRIOR_WIDTH_POINTS_PER_PP = 20.0
-HOME_B_PRIOR_WIDTH_MAX_PENALTY = 30.0
-HOME_B_PRIOR_GROWTH_POINTS_PER_PP = 100.0
-HOME_B_PRIOR_GROWTH_MAX_PENALTY = 20.0
-HOME_B_LIVE_EXPANSION_POINTS_PER_PCT = 0.5
-HOME_B_LIVE_EXPANSION_MAX_PENALTY = 50.0
+HOME_B_DESIRED_GAP_PCT = 2.0
+HOME_B_DESIRED_EXTERIOR_DISTANCE_PCT = 1.0
+HOME_B_PRIOR_SLOPE_FULL_PENALTY_PCT = 0.15  # % por vela de 15 minutos
+HOME_B_LIVE_BAND_MOVE_FULL_PENALTY_PCT = 0.20  # cambio real durante el corte
+HOME_B_PRIOR_WIDTH_POINTS_PER_PP = 15.0
+HOME_B_PRIOR_WIDTH_MAX_PENALTY = 15.0
+HOME_B_PRIOR_GROWTH_POINTS_PER_PP = 50.0
+HOME_B_PRIOR_GROWTH_MAX_PENALTY = 5.0
+HOME_B_LIVE_EXPANSION_POINTS_PER_PCT = 0.2
+HOME_B_LIVE_EXPANSION_MAX_PENALTY = 10.0
 
 
 def live_quote_observations(quotes: pd.DataFrame, opened_at: datetime,
@@ -58,10 +62,12 @@ def read_live_cut_observations(day: str, seconds: int,
     if saved.is_file():
         rows = pd.read_csv(saved)
         if set(LIVE_COLUMNS).issubset(rows.columns):
-            return rows.loc[rows.window_seconds.eq(seconds), list(LIVE_COLUMNS)]
+            matching = rows.loc[rows.window_seconds.eq(seconds), list(LIVE_COLUMNS)]
+            if not matching.empty:
+                return matching
     opened = datetime.combine(datetime.fromisoformat(day).date(), time(9, 30),
                               ZoneInfo("America/New_York"))
-    for available_seconds in (30, 60, 90):
+    for available_seconds in (10, 30, 60, 90):
         if available_seconds < seconds:
             continue
         flow = snapshot_dir / f"apertura_flujo_{available_seconds}s_{day}.csv"
@@ -151,13 +157,16 @@ def opening_reversal_table(setups: pd.DataFrame, observations: pd.DataFrame,
 
 
 def score_home_trial_b(setups: pd.DataFrame, reversals: pd.DataFrame) -> pd.DataFrame:
-    """Resta puntos por ancho previo, crecimiento previo y expansión al corte.
+    """Puntúa exterioridad, lateralidad y baja volatilidad sin cambiar la regla B.
 
     El ancho provisional usa BB(20,2) de 15 minutos calculada por el scanner
-    sólo con el precio disponible en el corte. Sin bandas válidas no hay score.
+    sólo con el precio disponible en el corte. La distancia se exige tanto al
+    primer precio como al corte; sin bandas o pendiente válidas no hay score.
     """
     columns = ["ticker", "prior_bb_width_pct", "prior_bb_width_change",
-               "cutoff_bb_upper", "cutoff_bb_lower"]
+               "prior_bb_upper", "prior_bb_lower", "prior_target_band_slope_pct",
+               "cutoff_bb_upper", "cutoff_bb_lower", "target_angle_cutoff_deg",
+               "angle_cutoff_event_span_seconds"]
     bands = setups.reindex(columns=columns).drop_duplicates("ticker")
     result = reversals.drop(columns=[column for column in columns[1:]
                                      if column in reversals.columns]).merge(
@@ -166,11 +175,52 @@ def score_home_trial_b(setups: pd.DataFrame, reversals: pd.DataFrame) -> pd.Data
     growth = pd.to_numeric(result.prior_bb_width_change, errors="coerce")
     upper = pd.to_numeric(result.cutoff_bb_upper, errors="coerce")
     lower = pd.to_numeric(result.cutoff_bb_lower, errors="coerce")
+    prior_upper = pd.to_numeric(result.prior_bb_upper, errors="coerce")
+    prior_lower = pd.to_numeric(result.prior_bb_lower, errors="coerce")
+    first = pd.to_numeric(result.first_price, errors="coerce")
+    current = pd.to_numeric(result.price_at_cutoff, errors="coerce")
+    upward = result.gap_direction.eq("UP")
+    result["distance_first_outside_bb_pct"] = np.where(
+        upward, (first / prior_upper - 1) * 100,
+        (prior_lower / first - 1) * 100)
+    result["distance_cut_outside_bb_pct"] = np.where(
+        upward, (current / upper - 1) * 100,
+        (lower / current - 1) * 100)
+    first_distance = result.distance_first_outside_bb_pct
+    cut_distance = result.distance_cut_outside_bb_pct
+    result["home_b_candidate"] = (result.candidate & first_distance.gt(0) &
+                                  cut_distance.gt(0))
+    result["home_b_status"] = np.select(
+        [~result.candidate, first_distance.isna() | cut_distance.isna(),
+         first_distance.le(0), cut_distance.le(0)],
+        ["No cumple gap y giro", "Sin bandas para medir distancia",
+         "Primera operación dentro de Bollinger",
+         "Precio al corte dentro de Bollinger"],
+        default="Gap, giro y precio fuera de Bollinger")
     middle = (upper + lower) / 2
     current_width = (upper - lower) / middle * 100
     expansion = (current_width / prior - 1) * 100
     result["cutoff_bb_width_pct"] = current_width
     result["bb_width_expansion_pct"] = expansion
+    # El ángulo del scanner está normalizado a cinco minutos. Deshacemos esa
+    # normalización para medir el movimiento real de banda en este corte.
+    angle = pd.to_numeric(result.target_angle_cutoff_deg, errors="coerce")
+    span = pd.to_numeric(result.angle_cutoff_event_span_seconds, errors="coerce")
+    result["live_band_move_pct"] = np.tan(np.deg2rad(angle)) * span / 300
+    prior_slope = pd.to_numeric(result.prior_target_band_slope_pct,
+                                errors="coerce")
+    result["penalty_gap"] = (
+        (1 - result.gap_at_open_pct.abs() / HOME_B_DESIRED_GAP_PCT)
+        .clip(lower=0, upper=1) * 10)
+    result["penalty_exterior_distance"] = (
+        (1 - cut_distance / HOME_B_DESIRED_EXTERIOR_DISTANCE_PCT)
+        .clip(lower=0, upper=1) * 30)
+    result["penalty_prior_lateral"] = (
+        prior_slope.abs() / HOME_B_PRIOR_SLOPE_FULL_PENALTY_PCT
+        * 20).clip(upper=20)
+    result["penalty_live_lateral"] = (
+        result.live_band_move_pct.abs() /
+        HOME_B_LIVE_BAND_MOVE_FULL_PENALTY_PCT * 20).clip(upper=20)
     result["penalty_prior_width"] = (
         (prior - HOME_B_MAX_PRIOR_WIDTH_PCT).clip(lower=0)
         * HOME_B_PRIOR_WIDTH_POINTS_PER_PP).clip(upper=HOME_B_PRIOR_WIDTH_MAX_PENALTY)
@@ -180,12 +230,15 @@ def score_home_trial_b(setups: pd.DataFrame, reversals: pd.DataFrame) -> pd.Data
     result["penalty_live_expansion"] = (
         expansion.clip(lower=0) * HOME_B_LIVE_EXPANSION_POINTS_PER_PCT
     ).clip(upper=HOME_B_LIVE_EXPANSION_MAX_PENALTY)
-    valid_bands = (prior.gt(0) & growth.notna() & upper.gt(lower) &
-                   middle.gt(0) & np.isfinite(current_width) &
-                   np.isfinite(expansion))
-    total_penalty = result[["penalty_prior_width", "penalty_prior_growth",
-                            "penalty_live_expansion"]].sum(axis=1)
+    valid_bands = (prior.gt(0) & growth.notna() & prior_upper.gt(prior_lower) &
+                   upper.gt(lower) & middle.gt(0) & prior_slope.notna() &
+                   span.gt(0) & np.isfinite(current_width) &
+                   np.isfinite(expansion) & np.isfinite(result.live_band_move_pct))
+    total_penalty = result[["penalty_gap", "penalty_exterior_distance",
+                            "penalty_prior_lateral",
+                            "penalty_live_lateral", "penalty_prior_width",
+                            "penalty_prior_growth", "penalty_live_expansion"]].sum(axis=1)
     result["score_home_b"] = np.where(
-        result.candidate & valid_bands,
+        result.home_b_candidate & valid_bands,
         (100 - total_penalty).clip(lower=0).round(1), np.nan)
     return result

@@ -30,7 +30,9 @@ class TrialVariantsTests(unittest.TestCase):
             quotes.to_csv(Path(folder) / "apertura_flujo_60s_2026-10-22.csv",
                           index=False)
             recovered = read_live_cut_observations("2026-10-22", 30, Path(folder))
+            ten = read_live_cut_observations("2026-10-22", 10, Path(folder))
         self.assertEqual(recovered.price.tolist(), [101.5])
+        self.assertEqual(ten.price.tolist(), [102.0])
 
     def test_low_volatility_uses_only_earlier_sessions(self):
         days = pd.date_range("2026-08-01", periods=12).strftime("%Y-%m-%d")
@@ -73,16 +75,47 @@ class TrialVariantsTests(unittest.TestCase):
     def test_home_b_score_rewards_low_stable_width_and_penalizes_expansion(self):
         setups = pd.DataFrame([
             {"ticker": "FLAT", "prior_close": 100.0,
-             "prior_bb_width_pct": 1.0, "prior_bb_width_change": -0.02,
-             "cutoff_bb_upper": 100.5, "cutoff_bb_lower": 99.5},
+             "prior_bb_upper": 100.0, "prior_bb_lower": 98.8,
+             "prior_bb_width_pct": 1.2, "prior_bb_width_change": -0.02,
+             "prior_target_band_slope_pct": 0.0,
+             "cutoff_bb_upper": 99.9, "cutoff_bb_lower": 98.9,
+             "target_angle_cutoff_deg": 0.0,
+             "angle_cutoff_event_span_seconds": 20.0},
             {"ticker": "WIDE", "prior_close": 100.0,
+             "prior_bb_upper": 100.5, "prior_bb_lower": 97.5,
              "prior_bb_width_pct": 3.0, "prior_bb_width_change": 0.10,
-             "cutoff_bb_upper": 102.4, "cutoff_bb_lower": 97.6},
+             "prior_target_band_slope_pct": 0.10,
+             "cutoff_bb_upper": 100.5, "cutoff_bb_lower": 95.7,
+             "target_angle_cutoff_deg": 30.0,
+             "angle_cutoff_event_span_seconds": 20.0},
+            {"ticker": "INSIDE", "prior_close": 100.0,
+             "prior_bb_upper": 103.0, "prior_bb_lower": 99.0,
+             "prior_bb_width_pct": 1.0, "prior_bb_width_change": 0.0,
+             "prior_target_band_slope_pct": 0.0,
+             "cutoff_bb_upper": 103.0, "cutoff_bb_lower": 102.0,
+             "target_angle_cutoff_deg": 0.0,
+             "angle_cutoff_event_span_seconds": 20.0},
+            {"ticker": "REENTER", "prior_close": 100.0,
+             "prior_bb_upper": 100.0, "prior_bb_lower": 98.8,
+             "prior_bb_width_pct": 1.2, "prior_bb_width_change": 0.0,
+             "prior_target_band_slope_pct": 0.0,
+             "cutoff_bb_upper": 101.5, "cutoff_bb_lower": 100.5,
+             "target_angle_cutoff_deg": 0.0,
+             "angle_cutoff_event_span_seconds": 20.0},
+            {"ticker": "DOWN", "prior_close": 100.0,
+             "prior_bb_upper": 101.0, "prior_bb_lower": 99.5,
+             "prior_bb_width_pct": 1.5, "prior_bb_width_change": 0.0,
+             "prior_target_band_slope_pct": 0.0,
+             "cutoff_bb_upper": 100.2, "cutoff_bb_lower": 99.2,
+             "target_angle_cutoff_deg": 0.0,
+             "angle_cutoff_event_span_seconds": 20.0},
             {"ticker": "MISSING", "prior_close": 100.0},
         ])
         observations = pd.DataFrame([
-            {"ticker": ticker, "window_seconds": 30, "first_price": 102.0,
-             "price": 101.0, "source": "test", "first_time": "09:30:01",
+            {"ticker": ticker, "window_seconds": 30,
+             "first_price": 98.0 if ticker == "DOWN" else 102.0,
+             "price": 99.0 if ticker == "DOWN" else 101.0,
+             "source": "test", "first_time": "09:30:01",
              "last_time": "09:30:29", "event_count": 2}
             for ticker in setups.ticker
         ])
@@ -90,10 +123,19 @@ class TrialVariantsTests(unittest.TestCase):
             setups, opening_reversal_table(setups, observations, 30))
         by_ticker = result.set_index("ticker")
         self.assertEqual(by_ticker.loc["FLAT", "score_home_b"], 100.0)
-        self.assertEqual(by_ticker.loc["WIDE", "score_home_b"], 30.0)
-        self.assertEqual(by_ticker.loc["WIDE", "penalty_prior_width"], 30.0)
-        self.assertEqual(by_ticker.loc["WIDE", "penalty_prior_growth"], 10.0)
-        self.assertAlmostEqual(by_ticker.loc["WIDE", "penalty_live_expansion"], 30.0)
+        self.assertTrue(by_ticker.loc["WIDE", "home_b_candidate"])
+        self.assertLess(by_ticker.loc["WIDE", "score_home_b"], 60.0)
+        self.assertGreater(by_ticker.loc["WIDE", "penalty_prior_lateral"], 0)
+        self.assertGreater(by_ticker.loc["WIDE", "penalty_live_lateral"], 0)
+        self.assertGreater(by_ticker.loc["WIDE", "penalty_live_expansion"], 0)
+        self.assertTrue(by_ticker.loc["INSIDE", "candidate"])
+        self.assertFalse(by_ticker.loc["INSIDE", "home_b_candidate"])
+        self.assertTrue(pd.isna(by_ticker.loc["INSIDE", "score_home_b"]))
+        self.assertTrue(by_ticker.loc["REENTER", "candidate"])
+        self.assertFalse(by_ticker.loc["REENTER", "home_b_candidate"])
+        self.assertLess(by_ticker.loc["REENTER", "distance_cut_outside_bb_pct"], 0)
+        self.assertTrue(by_ticker.loc["DOWN", "home_b_candidate"])
+        self.assertGreater(by_ticker.loc["DOWN", "distance_cut_outside_bb_pct"], 0)
         self.assertTrue(pd.isna(by_ticker.loc["MISSING", "score_home_b"]))
 
 

@@ -290,7 +290,7 @@ class OpeningCapture:
         try:
             folder = DATA_DIR / "snapshots"
             folder.mkdir(parents=True, exist_ok=True)
-            for seconds in DISPLAY_WINDOWS:
+            for seconds in (CAPTURE_SECONDS, *DISPLAY_WINDOWS):
                 path = folder / f"apertura_flujo_{seconds}s_{self.day.isoformat()}.csv"
                 deadline = self.opened_at + timedelta(seconds=seconds)
                 with path.open("w", newline="", encoding="utf-8") as file:
@@ -400,8 +400,10 @@ class OpeningCapture:
             quotes = self._frozen_quotes.copy()
             candles = self._prior_candles.copy()
             opening_events: dict[str, list[tuple[datetime, float]]] = {}
+            timely_events = []
             for quote in self._quote_events:
                 if quote.received_at <= self.cutoff and quote.event_time <= self.cutoff:
+                    timely_events.append(quote)
                     opening_events.setdefault(quote.ticker, []).append(
                         (quote.event_time, quote.price))
         try:
@@ -412,6 +414,20 @@ class OpeningCapture:
                                     opening_events=opening_events)
             path = DATA_DIR / "snapshots" / f"apertura_10s_{self.day.isoformat()}.csv"
             path.parent.mkdir(parents=True, exist_ok=True)
+            observations = live_quote_observations(pd.DataFrame.from_records([
+                {"ticker": quote.ticker, "price": quote.price,
+                 "quote_event_time": quote.event_time.isoformat(),
+                 "quote_received_at": quote.received_at.isoformat()}
+                for quote in timely_events]), self.opened_at, CAPTURE_SECONDS)
+            try:
+                setups.to_csv(
+                    path.parent / f"diagnostico_apertura_10s_{self.day.isoformat()}.csv",
+                    index=False)
+                observations.to_csv(
+                    path.parent / f"home_prueba_b_datos_10s_{self.day.isoformat()}.csv",
+                    index=False)
+            except OSError:
+                pass  # Los archivos auxiliares no deben invalidar el corte original.
             with path.open("w", newline="", encoding="utf-8") as file:
                 writer = csv.writer(file)
                 writer.writerow(("ticker", "price_at_cutoff", "quote_event_time",
