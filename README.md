@@ -665,7 +665,9 @@ provisional. El movimiento real deshace la normalización del ángulo a cinco
 minutos: `tan(angle_deg) * segundos_entre_cotizaciones / 300`. Así se
 penalizan ambas inclinaciones sin tratar una oscilación de un segundo como
 cinco minutos completos. Sin bandas o movimiento medible el score queda vacío.
-La tabla y el CSV muestran distancias, lateralidad y descuentos. Historial
+La tabla identifica fecha y corte; al seleccionar una empresa, el desplegable
+"Desglose del score" muestra cada descuento. El botón de descarga incluye
+las métricas y descuentos completos. Historial
 prueba B mantiene su regla binaria original. El primer precio recibido por
 Yahoo puede llegar después de la primera operación de bolsa; la hora de cada
 cotización aparece en el diagnóstico. La computadora o instancia que captura

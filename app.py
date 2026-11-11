@@ -784,6 +784,7 @@ def home_trial_panel() -> None:
     setups, frozen_candles, ready_at, observations = windows[seconds]
     result = score_home_trial_b(
         setups, opening_reversal_table(setups, observations, seconds, min_gap))
+    result.insert(0, "date", day)
     candidates = result.loc[result.home_b_candidate].sort_values(
         ["score_home_b", "reversal_pct", "ticker"],
         ascending=[False, False, True], na_position="last")
@@ -805,16 +806,20 @@ def home_trial_panel() -> None:
                "pendiente previa de la banda objetivo, movimiento "
                "real de esa banda dentro del corte, ancho previo alto y expansión "
                "del ancho. La lateralidad se evalúa en ambas direcciones; "
-               "si faltan bandas o movimiento medible, no se inventa score.")
+               "si faltan bandas o movimiento medible, no se inventa score. "
+               "La nota describe ese corte; no predice el resultado posterior.")
     if candidates.empty:
         st.info("Ningún símbolo cumplió gap, giro y exterioridad en este corte.")
     else:
         st.dataframe(candidates.reindex(columns=[
-            "ticker", "score_home_b", "gap_at_open_pct", "gap_direction",
+            "date", "window_seconds", "ticker", "score_home_b",
+            "gap_at_open_pct", "gap_direction",
             "distance_first_outside_bb_pct", "distance_cut_outside_bb_pct",
             "reversal_pct", "prior_target_band_slope_pct", "live_band_move_pct",
             "prior_bb_width_pct", "cutoff_bb_width_pct", "bb_width_expansion_pct"]),
             hide_index=True, width="stretch", column_config={
+                "date": "Fecha NY",
+                "window_seconds": "Corte (s)",
                 "ticker": "Empresa",
                 "score_home_b": st.column_config.NumberColumn("Score B", format="%.1f"),
                 "gap_at_open_pct": st.column_config.NumberColumn("Gap inicial %", format="%+.2f"),
@@ -857,6 +862,22 @@ def home_trial_panel() -> None:
     st.caption(f"Distancia fuera de BB: primera cotización "
                f"{row.distance_first_outside_bb_pct:+.2f}% · "
                f"corte {row.distance_cut_outside_bb_pct:+.2f}%")
+    with st.expander(f"Desglose del score · {selected}"):
+        breakdown = pd.DataFrame([
+            ("Gap", row.penalty_gap),
+            ("Distancia exterior", row.penalty_exterior_distance),
+            ("Pendiente previa", row.penalty_prior_lateral),
+            ("Movimiento de banda en el corte", row.penalty_live_lateral),
+            ("Ancho previo", row.penalty_prior_width),
+            ("Crecimiento previo del ancho", row.penalty_prior_growth),
+            ("Expansión del ancho en el corte", row.penalty_live_expansion),
+        ], columns=["Condición", "Puntos descontados"])
+        st.caption(f"Score congelado a las {cut_clock} ET: "
+                   "100 menos los descuentos siguientes. La gráfica puede "
+                   "mostrar velas y bandas definitivas posteriores al corte.")
+        st.dataframe(breakdown, hide_index=True, width="stretch",
+                     column_config={"Puntos descontados":
+                                    st.column_config.NumberColumn(format="%.1f")})
     refresher = market_refresh(day, 2)
     market_window = (now.weekday() < 5 and (9, 31) <= (now.hour, now.minute) <= (16, 15))
     if market_window:
